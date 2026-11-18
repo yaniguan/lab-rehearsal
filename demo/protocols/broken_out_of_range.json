@@ -1,0 +1,5 @@
+[
+  {"op": "pick_up_tip"},
+  {"op": "aspirate", "loc": "res:1", "vol": 10}, {"op": "dispense", "loc": "plate:A1", "vol": 10},
+  {"op": "drop_tip"}
+]

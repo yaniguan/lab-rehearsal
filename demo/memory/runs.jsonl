@@ -1,0 +1,10 @@
+{"run": 1, "protocol": "broken_aspirate_empty.json", "hash": "43a2527121f7", "passed": false, "violations": ["step 2 enough_liquid: aspirate 100 uL from res:3 holding 0 uL", "step 3 enough_liquid: dispense 100 uL but pipette holds 0 uL"]}
+{"run": 2, "protocol": "broken_out_of_range.json", "hash": "2e03525111f3", "passed": false, "violations": ["step 2 volume_in_range: 10 uL outside pipette range 20-300 uL", "step 3 volume_in_range: 10 uL outside pipette range 20-300 uL"]}
+{"run": 3, "protocol": "broken_overfill.json", "hash": "675b98ac918f", "passed": false, "violations": ["step 5 no_overfill: plate:A1 would hold 400 uL > 300 uL"]}
+{"run": 4, "protocol": "broken_tip_reuse.json", "hash": "2c4dbb514e7f", "passed": false, "violations": ["step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']"]}
+{"run": 5, "protocol": "good_serial_dilution.json", "hash": "e509e4ce8c28", "passed": true, "violations": []}
+{"run": 6, "protocol": "broken_aspirate_empty.json", "hash": "43a2527121f7", "passed": false, "violations": ["step 2 enough_liquid: aspirate 100 uL from res:3 holding 0 uL", "step 3 enough_liquid: dispense 100 uL but pipette holds 0 uL"]}
+{"run": 7, "protocol": "broken_out_of_range.json", "hash": "2e03525111f3", "passed": false, "violations": ["step 2 volume_in_range: 10 uL outside pipette range 20-300 uL", "step 3 volume_in_range: 10 uL outside pipette range 20-300 uL"]}
+{"run": 8, "protocol": "broken_overfill.json", "hash": "675b98ac918f", "passed": false, "violations": ["step 5 no_overfill: plate:A1 would hold 400 uL > 300 uL"]}
+{"run": 9, "protocol": "broken_tip_reuse.json", "hash": "2c4dbb514e7f", "passed": false, "violations": ["step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']"]}
+{"run": 10, "protocol": "good_serial_dilution.json", "hash": "e509e4ce8c28", "passed": true, "violations": []}
