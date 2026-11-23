@@ -247,9 +247,12 @@ def test_issue_6_malformed_vol_does_not_crash_or_poison_nan(bad_vol):
 
 # ---- Issue #7: Exact decimal / epsilon tolerance without float drift ----
 def test_issue_7_decimal_aliquots_summing_to_well_max_and_exact_depletion():
-    # Classic IEEE-754 drift: 10 * 27.3 + 27.0 == 300.00000000000006 > 300.0 in raw float!
+    # Classic IEEE-754 drift in sequential += loop: 10 * 27.3 + 27.0 == 300.00000000000006 > 300.0!
     aliquots = [27.3] * 10 + [27.0]
-    assert sum(aliquots) > 300.0
+    naive_acc = 0.0
+    for v in aliquots:
+        naive_acc += v
+    assert naive_acc > 300.0
     spec = DeckSpec(
         plate_dead_vol=0.0,
         res_dead_vol=0.0,
