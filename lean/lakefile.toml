@@ -1,0 +1,6 @@
+name = "lab-rehearsal-lean"
+version = "0.1.0"
+defaultTargets = ["LabRehearsalLean"]
+
+[[lean_lib]]
+name = "LabRehearsalLean"
