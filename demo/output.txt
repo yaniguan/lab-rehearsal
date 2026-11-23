@@ -1,5 +1,5 @@
 ######## pass 1 ########
-== broken_aspirate_empty.json (hash 43a2527121f7, 4 steps)
+== broken_aspirate_empty.json (hash f0c0e69b50c4, 4 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 0, tip on at end False
   VERIFY:   FAIL (2 violation(s))
@@ -7,71 +7,85 @@
     - step 3 enough_liquid: dispense 100 uL but pipette holds 0 uL
   RUN:      blocked by verify gate, nothing sent to the robot
   WRITE:    run #1 appended to memory/runs.jsonl
-== broken_out_of_range.json (hash 2e03525111f3, 4 steps)
+== broken_mix_contamination.json (hash 64f008f68f8f, 5 steps)
+  RECALL:   no earlier runs of this protocol
+  REHEARSE: tips used 1, plate wells filled 1, tip on at end False
+  VERIFY:   FAIL (1 violation(s))
+    - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
+  RUN:      blocked by verify gate, nothing sent to the robot
+  WRITE:    run #2 appended to memory/runs.jsonl
+== broken_out_of_range.json (hash b17defa68f72, 4 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (2 violation(s))
     - step 2 volume_in_range: 10 uL outside pipette range 20-300 uL
     - step 3 volume_in_range: 10 uL outside pipette range 20-300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #2 appended to memory/runs.jsonl
-== broken_overfill.json (hash 675b98ac918f, 6 steps)
+  WRITE:    run #3 appended to memory/runs.jsonl
+== broken_overfill.json (hash 8c84d8ed7942, 6 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 5 no_overfill: plate:A1 would hold 400 uL > 300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #3 appended to memory/runs.jsonl
-== broken_tip_reuse.json (hash 2c4dbb514e7f, 6 steps)
+  WRITE:    run #4 appended to memory/runs.jsonl
+== broken_tip_reuse.json (hash f59a730bc07f, 6 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 2, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #4 appended to memory/runs.jsonl
-== good_serial_dilution.json (hash e509e4ce8c28, 43 steps)
+  WRITE:    run #5 appended to memory/runs.jsonl
+== good_serial_dilution.json (hash ac7be679b3d9, 43 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 2, plate wells filled 8, tip on at end False
   VERIFY:   PASS (0 violation(s))
   RUN:      sent 43 commands aspirate x16, dispense x16, drop_tip x2, mix x7, pick_up_tip x2
             final plate: A1=100, B1=100, C1=100, D1=100, E1=100, F1=100, G1=100, H1=100
-  WRITE:    run #5 appended to memory/runs.jsonl
+  WRITE:    run #6 appended to memory/runs.jsonl
 ######## pass 2 ########
-== broken_aspirate_empty.json (hash 43a2527121f7, 4 steps)
+== broken_aspirate_empty.json (hash f0c0e69b50c4, 4 steps)
   RECALL:   WARNING: failed before in run(s) [1] (enough_liquid)
   REHEARSE: tips used 1, plate wells filled 0, tip on at end False
   VERIFY:   FAIL (2 violation(s))
     - step 2 enough_liquid: aspirate 100 uL from res:3 holding 0 uL
     - step 3 enough_liquid: dispense 100 uL but pipette holds 0 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #6 appended to memory/runs.jsonl
-== broken_out_of_range.json (hash 2e03525111f3, 4 steps)
-  RECALL:   WARNING: failed before in run(s) [2] (volume_in_range)
+  WRITE:    run #7 appended to memory/runs.jsonl
+== broken_mix_contamination.json (hash 64f008f68f8f, 5 steps)
+  RECALL:   WARNING: failed before in run(s) [2] (no_tip_reuse)
+  REHEARSE: tips used 1, plate wells filled 1, tip on at end False
+  VERIFY:   FAIL (1 violation(s))
+    - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
+  RUN:      blocked by verify gate, nothing sent to the robot
+  WRITE:    run #8 appended to memory/runs.jsonl
+== broken_out_of_range.json (hash b17defa68f72, 4 steps)
+  RECALL:   WARNING: failed before in run(s) [3] (volume_in_range)
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (2 violation(s))
     - step 2 volume_in_range: 10 uL outside pipette range 20-300 uL
     - step 3 volume_in_range: 10 uL outside pipette range 20-300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #7 appended to memory/runs.jsonl
-== broken_overfill.json (hash 675b98ac918f, 6 steps)
-  RECALL:   WARNING: failed before in run(s) [3] (no_overfill)
+  WRITE:    run #9 appended to memory/runs.jsonl
+== broken_overfill.json (hash 8c84d8ed7942, 6 steps)
+  RECALL:   WARNING: failed before in run(s) [4] (no_overfill)
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 5 no_overfill: plate:A1 would hold 400 uL > 300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #8 appended to memory/runs.jsonl
-== broken_tip_reuse.json (hash 2c4dbb514e7f, 6 steps)
-  RECALL:   WARNING: failed before in run(s) [4] (no_tip_reuse)
+  WRITE:    run #10 appended to memory/runs.jsonl
+== broken_tip_reuse.json (hash f59a730bc07f, 6 steps)
+  RECALL:   WARNING: failed before in run(s) [5] (no_tip_reuse)
   REHEARSE: tips used 1, plate wells filled 2, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #9 appended to memory/runs.jsonl
-== good_serial_dilution.json (hash e509e4ce8c28, 43 steps)
-  RECALL:   passed before in run(s) [5]
+  WRITE:    run #11 appended to memory/runs.jsonl
+== good_serial_dilution.json (hash ac7be679b3d9, 43 steps)
+  RECALL:   passed before in run(s) [6]
   REHEARSE: tips used 2, plate wells filled 8, tip on at end False
   VERIFY:   PASS (0 violation(s))
   RUN:      sent 43 commands aspirate x16, dispense x16, drop_tip x2, mix x7, pick_up_tip x2
             final plate: A1=100, B1=100, C1=100, D1=100, E1=100, F1=100, G1=100, H1=100
-  WRITE:    run #10 appended to memory/runs.jsonl
-######## memory: 10 runs, 2 passed, 8 failed
+  WRITE:    run #12 appended to memory/runs.jsonl
+######## memory: 12 runs, 2 passed, 10 failed

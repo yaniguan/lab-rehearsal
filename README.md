@@ -24,38 +24,55 @@ Full architectural documentation, state-machine invariants, commit history, and 
 ```text
 lab-rehearsal/
 ├── .github/workflows/
-│   └── demo.yml                          # CI workflow running demo/rehearse.py on Python 3.12
+│   └── demo.yml                          # CI matrix (Python 3.10-3.12): pytest, output parity, catalog check
+├── catalog/
+│   └── simulators.json                   # SPDX & license-governance manifest for datasets and simulators
 ├── demo/
 │   ├── memory/
-│   │   └── runs.jsonl                    # Append-only 2-pass episodic run history (10 runs)
+│   │   └── runs.jsonl                    # Reference 2-pass structured episodic run history (12 runs)
 │   ├── protocols/
 │   │   ├── broken_aspirate_empty.json    # Empty-reservoir aspiration & dispense fixture
+│   │   ├── broken_mix_contamination.json # Dirty-tip mix cross-contamination fixture
 │   │   ├── broken_out_of_range.json      # Sub-minimum pipette volume (10 uL < 20 uL) fixture
 │   │   ├── broken_overfill.json          # Well capacity overflow (400 uL > 300 uL) fixture
 │   │   ├── broken_tip_reuse.json         # Cross-reagent tip contamination fixture
 │   │   └── good_serial_dilution.json     # Valid 43-step 8-well 1:2 serial dilution protocol
 │   ├── output.txt                        # Reference stdout capture from 2-pass demo
-│   └── rehearse.py                       # Recall -> Rehearse -> Verify -> Run -> Write-Back loop
+│   └── rehearse.py                       # CLI / showcase entrypoint wrapping lab_rehearsal
 ├── docs/
 │   └── ARCHITECTURE_AND_HISTORY.md       # Deep technical profile (Object, Data, Model, History)
+├── schema/
+│   ├── protocol.schema.json              # Strict JSON Schema for micro-step protocols
+│   └── run_record.schema.json            # Strict JSON Schema for episodic runs.jsonl records
+├── scripts/
+│   └── check_catalog.py                  # Automated SPDX license & markdown URL validator
+├── src/lab_rehearsal/
+│   ├── __init__.py                       # Public package API
+│   ├── adapters.py                       # Bidirectional stepbot / twinstep / LabLean IR converters
+│   ├── cli.py                            # CLI (--demo, --memory, --fast-deny, --monte-carlo, --json)
+│   └── core.py                           # Quantitative deck twin, default-deny gate, and MemoryStore
+├── tests/
+│   ├── fixtures/twinstep_twins.jsonl     # Corrupted/clean twinstep benchmark fixture
+│   └── test_rehearse.py                  # Regression & unit test suite
 ├── LICENSE                               # MIT License
+├── pyproject.toml                        # Package metadata and console script
 ├── README.md                             # Overview, demo output, and curated simulation catalog
-└── requirements.txt                      # Python standard library only
+└── requirements.txt                      # Python standard library core
 ```
 
 ## First attempt
 
-A virtual deck (96-well plate, 12-column reservoir, 96-tip rack, 20-300 uL single-channel pipette). Five JSON protocols: one good 8-well serial dilution and four broken ones (overfill, out-of-range volume, aspirate from empty, tip reuse). Each goes through recall, rehearse, verify, run (mock) and write back to `demo/memory/runs.jsonl`. All five run twice so the second pass shows recall warnings.
+A virtual deck (96-well plate with 5 uL dead volume, 12-column reservoir with 500 uL trough dead volume and designated waste sink `res:12`, addressable 96-tip rack `tiprack:A1..H12`, 20-300 uL single-channel pipette). Six JSON protocols: one good 8-well serial dilution and five broken ones (overfill, out-of-range volume, aspirate from empty, aspirate tip reuse, mix cross-contamination). Each goes through recall, rehearse, verify, run (mock) and write back (`--demo` uses an isolated temporary ledger so tracked `demo/memory/runs.jsonl` stays clean).
 
 ```bash
-python demo/rehearse.py
+python demo/rehearse.py --demo
 ```
 
-Output (Linux, CPU only, 2026-11-18):
+Output:
 
 ```
 ######## pass 1 ########
-== broken_aspirate_empty.json (hash 43a2527121f7, 4 steps)
+== broken_aspirate_empty.json (hash f0c0e69b50c4, 4 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 0, tip on at end False
   VERIFY:   FAIL (2 violation(s))
@@ -63,77 +80,91 @@ Output (Linux, CPU only, 2026-11-18):
     - step 3 enough_liquid: dispense 100 uL but pipette holds 0 uL
   RUN:      blocked by verify gate, nothing sent to the robot
   WRITE:    run #1 appended to memory/runs.jsonl
-== broken_out_of_range.json (hash 2e03525111f3, 4 steps)
+== broken_mix_contamination.json (hash 64f008f68f8f, 5 steps)
+  RECALL:   no earlier runs of this protocol
+  REHEARSE: tips used 1, plate wells filled 1, tip on at end False
+  VERIFY:   FAIL (1 violation(s))
+    - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
+  RUN:      blocked by verify gate, nothing sent to the robot
+  WRITE:    run #2 appended to memory/runs.jsonl
+== broken_out_of_range.json (hash b17defa68f72, 4 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (2 violation(s))
     - step 2 volume_in_range: 10 uL outside pipette range 20-300 uL
     - step 3 volume_in_range: 10 uL outside pipette range 20-300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #2 appended to memory/runs.jsonl
-== broken_overfill.json (hash 675b98ac918f, 6 steps)
+  WRITE:    run #3 appended to memory/runs.jsonl
+== broken_overfill.json (hash 8c84d8ed7942, 6 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 5 no_overfill: plate:A1 would hold 400 uL > 300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #3 appended to memory/runs.jsonl
-== broken_tip_reuse.json (hash 2c4dbb514e7f, 6 steps)
+  WRITE:    run #4 appended to memory/runs.jsonl
+== broken_tip_reuse.json (hash f59a730bc07f, 6 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 1, plate wells filled 2, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #4 appended to memory/runs.jsonl
-== good_serial_dilution.json (hash e509e4ce8c28, 43 steps)
+  WRITE:    run #5 appended to memory/runs.jsonl
+== good_serial_dilution.json (hash ac7be679b3d9, 43 steps)
   RECALL:   no earlier runs of this protocol
   REHEARSE: tips used 2, plate wells filled 8, tip on at end False
   VERIFY:   PASS (0 violation(s))
   RUN:      sent 43 commands aspirate x16, dispense x16, drop_tip x2, mix x7, pick_up_tip x2
             final plate: A1=100, B1=100, C1=100, D1=100, E1=100, F1=100, G1=100, H1=100
-  WRITE:    run #5 appended to memory/runs.jsonl
+  WRITE:    run #6 appended to memory/runs.jsonl
 ######## pass 2 ########
-== broken_aspirate_empty.json (hash 43a2527121f7, 4 steps)
+== broken_aspirate_empty.json (hash f0c0e69b50c4, 4 steps)
   RECALL:   WARNING: failed before in run(s) [1] (enough_liquid)
   REHEARSE: tips used 1, plate wells filled 0, tip on at end False
   VERIFY:   FAIL (2 violation(s))
     - step 2 enough_liquid: aspirate 100 uL from res:3 holding 0 uL
     - step 3 enough_liquid: dispense 100 uL but pipette holds 0 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #6 appended to memory/runs.jsonl
-== broken_out_of_range.json (hash 2e03525111f3, 4 steps)
-  RECALL:   WARNING: failed before in run(s) [2] (volume_in_range)
+  WRITE:    run #7 appended to memory/runs.jsonl
+== broken_mix_contamination.json (hash 64f008f68f8f, 5 steps)
+  RECALL:   WARNING: failed before in run(s) [2] (no_tip_reuse)
+  REHEARSE: tips used 1, plate wells filled 1, tip on at end False
+  VERIFY:   FAIL (1 violation(s))
+    - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
+  RUN:      blocked by verify gate, nothing sent to the robot
+  WRITE:    run #8 appended to memory/runs.jsonl
+== broken_out_of_range.json (hash b17defa68f72, 4 steps)
+  RECALL:   WARNING: failed before in run(s) [3] (volume_in_range)
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (2 violation(s))
     - step 2 volume_in_range: 10 uL outside pipette range 20-300 uL
     - step 3 volume_in_range: 10 uL outside pipette range 20-300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #7 appended to memory/runs.jsonl
-== broken_overfill.json (hash 675b98ac918f, 6 steps)
-  RECALL:   WARNING: failed before in run(s) [3] (no_overfill)
+  WRITE:    run #9 appended to memory/runs.jsonl
+== broken_overfill.json (hash 8c84d8ed7942, 6 steps)
+  RECALL:   WARNING: failed before in run(s) [4] (no_overfill)
   REHEARSE: tips used 1, plate wells filled 1, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 5 no_overfill: plate:A1 would hold 400 uL > 300 uL
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #8 appended to memory/runs.jsonl
-== broken_tip_reuse.json (hash 2c4dbb514e7f, 6 steps)
-  RECALL:   WARNING: failed before in run(s) [4] (no_tip_reuse)
+  WRITE:    run #10 appended to memory/runs.jsonl
+== broken_tip_reuse.json (hash f59a730bc07f, 6 steps)
+  RECALL:   WARNING: failed before in run(s) [5] (no_tip_reuse)
   REHEARSE: tips used 1, plate wells filled 2, tip on at end False
   VERIFY:   FAIL (1 violation(s))
     - step 4 no_tip_reuse: tip carrying ['sample'] reused in res:1 containing ['buffer']
   RUN:      blocked by verify gate, nothing sent to the robot
-  WRITE:    run #9 appended to memory/runs.jsonl
-== good_serial_dilution.json (hash e509e4ce8c28, 43 steps)
-  RECALL:   passed before in run(s) [5]
+  WRITE:    run #11 appended to memory/runs.jsonl
+== good_serial_dilution.json (hash ac7be679b3d9, 43 steps)
+  RECALL:   passed before in run(s) [6]
   REHEARSE: tips used 2, plate wells filled 8, tip on at end False
   VERIFY:   PASS (0 violation(s))
   RUN:      sent 43 commands aspirate x16, dispense x16, drop_tip x2, mix x7, pick_up_tip x2
             final plate: A1=100, B1=100, C1=100, D1=100, E1=100, F1=100, G1=100, H1=100
-  WRITE:    run #10 appended to memory/runs.jsonl
-######## memory: 10 runs, 2 passed, 8 failed
+  WRITE:    run #12 appended to memory/runs.jsonl
+######## memory: 12 runs, 2 passed, 10 failed
 ```
 
-Only the good protocol reaches the mock executor; each broken one is stopped by the rule it breaks, and on the second pass recall flags it before rehearsal. This is bookkeeping, not physics. Next: replay the same steps in a physics simulator (MuJoCo-based AutoBio or a lab scene) and add pipetting error models.
+Only the good protocol reaches the mock executor; each broken one is stopped by the rule it breaks, and on the second pass recall flags it before rehearsal. Optional seeded ISO 8655 pipetting error rollouts (`--monte-carlo N`) quantify overfill risk and concentration drift bounds, while `lab_rehearsal.adapters` provides bidirectional protocol IR conversion across `stepbot`, `twinstep`, and `YLM/lean` (`LabLean`).
 
 ## Datasets
 

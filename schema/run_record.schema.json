@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yaniguan/lab-rehearsal/schema/run_record.schema.json",
+  "title": "LabRehearsalRunRecord",
+  "description": "Strict episodic memory JSONL record schema for lab-rehearsal.",
+  "type": "object",
+  "required": [
+    "run",
+    "run_uuid",
+    "timestamp_utc",
+    "protocol",
+    "hash",
+    "steps_hash",
+    "env_hash",
+    "rules_version",
+    "verify_passed",
+    "run_passed",
+    "passed",
+    "violations",
+    "run_errors"
+  ],
+  "properties": {
+    "run": { "type": "integer", "minimum": 1 },
+    "run_uuid": { "type": "string", "minLength": 8 },
+    "timestamp_utc": { "type": "string", "minLength": 10 },
+    "protocol": { "type": "string", "minLength": 1 },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "steps_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "env_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "rules_version": { "type": "string", "minLength": 1 },
+    "verify_passed": { "type": "boolean" },
+    "run_passed": { "type": ["boolean", "null"] },
+    "passed": { "type": "boolean" },
+    "violations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["step", "rule", "message"],
+        "properties": {
+          "step": { "type": "integer", "minimum": 0 },
+          "rule": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "run_errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}

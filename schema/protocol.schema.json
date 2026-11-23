@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yaniguan/lab-rehearsal/schema/protocol.schema.json",
+  "title": "LabRehearsalProtocol",
+  "description": "Strict default-deny schema for liquid-handling micro-step protocols.",
+  "type": "array",
+  "minItems": 1,
+  "items": {
+    "oneOf": [
+      {
+        "type": "object",
+        "required": ["op"],
+        "properties": {
+          "op": { "const": "pick_up_tip" },
+          "loc": {
+            "type": "string",
+            "pattern": "^tiprack:[A-H](1[0-2]|[1-9])$"
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op"],
+        "properties": {
+          "op": { "const": "drop_tip" },
+          "allow_wet_drop": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op", "loc", "vol"],
+        "properties": {
+          "op": { "const": "aspirate" },
+          "loc": {
+            "type": "string",
+            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|trash:1)$"
+          },
+          "vol": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op", "loc", "vol"],
+        "properties": {
+          "op": { "const": "dispense" },
+          "loc": {
+            "type": "string",
+            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|trash:1)$"
+          },
+          "vol": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "air_dispense": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op", "loc", "vol"],
+        "properties": {
+          "op": { "const": "mix" },
+          "loc": {
+            "type": "string",
+            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|trash:1)$"
+          },
+          "vol": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "reps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      }
+    ]
+  }
+}
