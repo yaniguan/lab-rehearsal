@@ -6,10 +6,21 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: python demo/rehearse.py
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -v
+      - name: Verify deterministic demo showcase and output parity
+        run: |
+          python demo/rehearse.py --demo > /tmp/demo_out.txt
+          diff -u demo/output.txt /tmp/demo_out.txt
+      - name: Validate simulator license catalog and markdown links
+        run: python scripts/check_catalog.py
+      - name: Ensure repository working tree remains clean
+        run: test -z "$(git status --porcelain)"

@@ -1,0 +1,142 @@
+{
+  "schema_version": "1.0.0",
+  "updated_at": "2026-11-23",
+  "datasets": [
+    {
+      "id": "labutopia",
+      "name": "LabUtopia",
+      "url": "https://github.com/Rui-li023/LabUtopia",
+      "paper_url": "https://arxiv.org/abs/2505.22634",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "notes": "MIT license on repository code; verify third-party scene assets separately."
+    },
+    {
+      "id": "autobio",
+      "name": "AutoBio",
+      "url": "https://github.com/autobio-bench/AutoBio",
+      "paper_url": "https://arxiv.org/abs/2505.14030",
+      "spdx_license": "NOASSERTION",
+      "license_status": "no_license_file",
+      "commercial_use_ok": false,
+      "redistribution_ok": false,
+      "notes": "Datasets declared MIT, but GitHub repository lacks a top-level LICENSE file; default-deny automated asset fetch."
+    },
+    {
+      "id": "chemistry3d",
+      "name": "Chemistry3D",
+      "url": "https://github.com/huangyan28/Chemistry3D",
+      "paper_url": "https://arxiv.org/abs/2406.08160",
+      "spdx_license": "NOASSERTION",
+      "license_status": "no_license_file",
+      "commercial_use_ok": false,
+      "redistribution_ok": false,
+      "notes": "No repository LICENSE file; default-deny commercial use and redistribution until upstream license is published."
+    },
+    {
+      "id": "labimus",
+      "name": "Labimus",
+      "url": "https://labimus.github.io/",
+      "paper_url": "https://arxiv.org/abs/2606.31037",
+      "spdx_license": "NOASSERTION",
+      "license_status": "check_project_site",
+      "commercial_use_ok": false,
+      "redistribution_ok": false,
+      "notes": "Project site hosts benchmark overview without explicit SPDX grant; default-deny automated ingestion."
+    }
+  ],
+  "repositories": [
+    {
+      "id": "genesis-world",
+      "name": "Genesis-Embodied-AI/genesis-world",
+      "url": "https://github.com/Genesis-Embodied-AI/genesis-world",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "lerobot",
+      "name": "huggingface/lerobot",
+      "url": "https://github.com/huggingface/lerobot",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "mujoco",
+      "name": "google-deepmind/mujoco",
+      "url": "https://github.com/google-deepmind/mujoco",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "isaaclab",
+      "name": "isaac-sim/IsaacLab",
+      "url": "https://github.com/isaac-sim/IsaacLab",
+      "spdx_license": "BSD-3-Clause",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "maniskill",
+      "name": "mani-skill/ManiSkill",
+      "url": "https://github.com/mani-skill/ManiSkill",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "pylabrobot",
+      "name": "PyLabRobot/pylabrobot",
+      "url": "https://github.com/PyLabRobot/pylabrobot",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "opentrons",
+      "name": "Opentrons/opentrons",
+      "url": "https://github.com/Opentrons/opentrons",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "autobio-repo",
+      "name": "autobio-bench/AutoBio",
+      "url": "https://github.com/autobio-bench/AutoBio",
+      "spdx_license": "NOASSERTION",
+      "license_status": "no_license_file",
+      "commercial_use_ok": false,
+      "redistribution_ok": false
+    },
+    {
+      "id": "chemistry3d-repo",
+      "name": "huangyan28/Chemistry3D",
+      "url": "https://github.com/huangyan28/Chemistry3D",
+      "spdx_license": "NOASSERTION",
+      "license_status": "no_license_file",
+      "commercial_use_ok": false,
+      "redistribution_ok": false
+    },
+    {
+      "id": "labutopia-repo",
+      "name": "Rui-li023/LabUtopia",
+      "url": "https://github.com/Rui-li023/LabUtopia",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    }
+  ]
+}

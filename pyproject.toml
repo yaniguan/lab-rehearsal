@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lab-rehearsal"
+version = "0.2.0"
+description = "Digital-twin rehearsal, default-deny safety verification, and episodic write-back for liquid-handling protocols."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "jsonschema>=4.20",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+lab-rehearsal = "lab_rehearsal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
