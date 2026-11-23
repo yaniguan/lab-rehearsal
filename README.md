@@ -2,9 +2,46 @@
 
 Before a robot touches a real plate, *rehearse it*: recall past runs, dry-run in a digital twin, verify, run, and write the result back.
 
+> **Auto-Lab Ecosystem**: Layer `L4 · Digital-Twin Rehearsal & Default-Deny Verification` in [auto-lab](https://github.com/yaniguan/auto-lab) · [Project Studio](https://yaniguan.github.io/auto-lab/)
+
 ## Where it fits
 
-In the lab agent on [yaniguan.github.io](https://yaniguan.github.io/), the plan is to simulate each step before running it. The loop is: **recall** what happened before, **rehearse** in a digital twin, **verify** with a default-deny gate, **run**, and **write back** the outcome so the next plan can learn from it. This repo collects lab simulators and benchmarks, and starts with a minimal loop for liquid handling.
+In the [Auto-Lab](https://github.com/yaniguan/auto-lab) system ([yaniguan.github.io/auto-lab](https://yaniguan.github.io/auto-lab/)), the plan is to simulate each step before running it. The loop is: **recall** what happened before, **rehearse** in a digital twin, **verify** with a default-deny gate, **run**, and **write back** the outcome so the next plan can learn from it. This repo collects lab simulators and benchmarks, and starts with a minimal loop for liquid handling.
+
+## System Profile: Object · Data · Model · Training · History · Unique Properties
+
+Full architectural documentation, state-machine invariants, commit history, and sibling-repository contracts are maintained in [`docs/ARCHITECTURE_AND_HISTORY.md`](docs/ARCHITECTURE_AND_HISTORY.md):
+
+- **Object**: Pre-execution digital-twin rehearsal and default-deny safety gate (`L4`) sitting between `L5` protocol planners/compilers (`lab-decide`, `labshift`, `stepbot`) and `L1`/`L2` hardware drivers (`lab-hands`, Opentrons, PyLabRobot).
+- **Data**: 5 deterministic JSON liquid-handling protocols (`1` valid 43-step 8-well serial dilution, `4` failure fixtures), a 10-run two-pass episodic ledger (`demo/memory/runs.jsonl`), reference output (`demo/output.txt`), and a zero-copy catalog of 4 embodied lab datasets and 10 open-source simulators.
+- **Model**: Deterministic discrete-event deck state machine (`96`-well plate, `12`-column reservoir, `96`-tip rack, $20\text{–}300\,\mu\text{L}$ pipette) coupled with 7 default-deny verification checks (`known_step`, `volume_in_range`, `no_overfill`, `enough_liquid`, `tip_present`, `no_tip_reuse`, `all_tips_dropped`). No neural network is trained in this repo.
+- **Training**: Zero parametric training; cross-run adaptation operates strictly via non-parametric SHA-256 content-addressed episodic write-back to `demo/memory/runs.jsonl`.
+- **History**: Initialized in `8219695` (`2026-11-18`) with the 5-stage rehearsal loop, protocol test fixtures, and curated robotics/simulation references.
+- **Unique Properties**: Non-short-circuiting trajectory simulation that surfaces all cascading step violations in one pass, strict default-deny execution blocking, zero external Python dependencies, and conceptual alignment with `YLM/lean` (`LabLean`), `stepbot`, and `twinstep`.
+
+## Repository Layout
+
+```text
+lab-rehearsal/
+├── .github/workflows/
+│   └── demo.yml                          # CI workflow running demo/rehearse.py on Python 3.12
+├── demo/
+│   ├── memory/
+│   │   └── runs.jsonl                    # Append-only 2-pass episodic run history (10 runs)
+│   ├── protocols/
+│   │   ├── broken_aspirate_empty.json    # Empty-reservoir aspiration & dispense fixture
+│   │   ├── broken_out_of_range.json      # Sub-minimum pipette volume (10 uL < 20 uL) fixture
+│   │   ├── broken_overfill.json          # Well capacity overflow (400 uL > 300 uL) fixture
+│   │   ├── broken_tip_reuse.json         # Cross-reagent tip contamination fixture
+│   │   └── good_serial_dilution.json     # Valid 43-step 8-well 1:2 serial dilution protocol
+│   ├── output.txt                        # Reference stdout capture from 2-pass demo
+│   └── rehearse.py                       # Recall -> Rehearse -> Verify -> Run -> Write-Back loop
+├── docs/
+│   └── ARCHITECTURE_AND_HISTORY.md       # Deep technical profile (Object, Data, Model, History)
+├── LICENSE                               # MIT License
+├── README.md                             # Overview, demo output, and curated simulation catalog
+└── requirements.txt                      # Python standard library only
+```
 
 ## First attempt
 
