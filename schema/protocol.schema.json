@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/yaniguan/lab-rehearsal/schema/protocol.schema.json",
   "title": "LabRehearsalProtocol",
-  "description": "Strict default-deny schema for liquid-handling micro-step protocols.",
+  "description": "Strict default-deny schema for liquid-handling and thermal/state micro-step protocols.",
   "type": "array",
   "minItems": 1,
   "items": {
@@ -15,6 +15,14 @@
           "loc": {
             "type": "string",
             "pattern": "^tiprack:[A-H](1[0-2]|[1-9])$"
+          },
+          "channels": {
+            "type": "integer",
+            "enum": [1, 8]
+          },
+          "pipette": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "additionalProperties": false
@@ -24,7 +32,15 @@
         "required": ["op"],
         "properties": {
           "op": { "const": "drop_tip" },
-          "allow_wet_drop": { "type": "boolean" }
+          "allow_wet_drop": { "type": "boolean" },
+          "channels": {
+            "type": "integer",
+            "enum": [1, 8]
+          },
+          "pipette": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "additionalProperties": false
       },
@@ -40,6 +56,14 @@
           "vol": {
             "type": "number",
             "exclusiveMinimum": 0
+          },
+          "channels": {
+            "type": "integer",
+            "enum": [1, 8]
+          },
+          "pipette": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "additionalProperties": false
@@ -57,7 +81,15 @@
             "type": "number",
             "exclusiveMinimum": 0
           },
-          "air_dispense": { "type": "boolean" }
+          "air_dispense": { "type": "boolean" },
+          "channels": {
+            "type": "integer",
+            "enum": [1, 8]
+          },
+          "pipette": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "additionalProperties": false
       },
@@ -78,6 +110,57 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 100
+          },
+          "channels": {
+            "type": "integer",
+            "enum": [1, 8]
+          },
+          "pipette": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op", "loc", "temp_c", "duration_s"],
+        "properties": {
+          "op": { "const": "incubate" },
+          "loc": {
+            "type": "string",
+            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|plate)$"
+          },
+          "temp_c": {
+            "type": "number"
+          },
+          "duration_s": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op", "loc"],
+        "properties": {
+          "op": { "const": "seal" },
+          "loc": {
+            "type": "string",
+            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|plate)$"
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": ["op", "loc"],
+        "properties": {
+          "op": { "const": "thaw" },
+          "loc": {
+            "type": "string",
+            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|plate)$"
           }
         },
         "additionalProperties": false

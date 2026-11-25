@@ -9,7 +9,7 @@ from pathlib import Path
 import tempfile
 from typing import Any, Sequence
 
-from .adapters import from_stepbot, from_twinstep
+from .adapters import from_lablean, from_stepbot, from_twinstep
 from .core import (
     DEFAULT_DECK_SPEC,
     DeckSpec,
@@ -39,6 +39,14 @@ def _load_steps_file(path: Path, fmt: str = "auto") -> tuple[Any, DeckSpec]:
         isinstance(raw, list) and raw and isinstance(raw[0], dict) and "type" in raw[0]
     ):
         return from_twinstep(raw, tip_policy="smart"), DEFAULT_DECK_SPEC
+    if fmt == "lablean" or (
+        isinstance(raw, dict)
+        and isinstance(raw.get("steps"), list)
+        and raw["steps"]
+        and isinstance(raw["steps"][0], dict)
+        and "kind" in raw["steps"][0]
+    ):
+        return from_lablean(raw), DEFAULT_DECK_SPEC
     return raw, DEFAULT_DECK_SPEC
 
 
@@ -152,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--format",
-        choices=("auto", "native", "stepbot", "twinstep"),
+        choices=("auto", "native", "stepbot", "twinstep", "lablean"),
         default="auto",
         help="Input protocol IR format.",
     )
@@ -222,6 +230,7 @@ def main(argv: Sequence[str] | None = None, *, default_demo_dir: Path | None = N
             file_spec = DeckSpec(
                 well_max=file_spec.well_max,
                 res_max=file_spec.res_max,
+                trash_max=file_spec.trash_max,
                 pip_min=file_spec.pip_min,
                 pip_max=file_spec.pip_max,
                 tip_rack=file_spec.tip_rack,
@@ -230,6 +239,12 @@ def main(argv: Sequence[str] | None = None, *, default_demo_dir: Path | None = N
                 start=file_spec.start,
                 diluents=file_spec.diluents,
                 waste_locs=file_spec.waste_locs,
+                channels=file_spec.channels,
+                pipettes=file_spec.pipettes,
+                frozen_locs=file_spec.frozen_locs,
+                sealed_locs=file_spec.sealed_locs,
+                evap_coeffs=file_spec.evap_coeffs,
+                strict_tenths=file_spec.strict_tenths,
             )
         session.spec = file_spec
         res = session.evaluate_protocol(p_path.name, steps)

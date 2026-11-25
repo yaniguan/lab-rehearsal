@@ -19,6 +19,15 @@ Full architectural documentation, state-machine invariants, commit history, and 
 - **History**: Initialized in `8219695` (`2026-11-18`) with the 5-stage rehearsal loop, protocol test fixtures, and curated robotics/simulation references.
 - **Unique Properties**: Non-short-circuiting trajectory simulation that surfaces all cascading step violations in one pass, strict default-deny execution blocking, zero external Python dependencies, and conceptual alignment with `YLM/lean` (`LabLean`), `stepbot`, and `twinstep`.
 
+## 15-Repository Auto-Lab Wire Contract (`autolab-wire/v1`)
+
+`autolab_wire.py` (`REPO_ID = "lab-rehearsal"`, `LAYER = "L4"`) connects `lab-rehearsal` into the deterministic 15-repository [Auto-Lab](https://github.com/yaniguan/auto-lab) packet pipeline (`lab-ears -> lab-ask-why -> lab-decide -> lab-automation-atlas -> buy-or-make -> labshift -> lab-rehearsal -> lab-verify -> stepbot -> lab-hands -> lab-feet -> lab-attrib -> twinstep -> labfill -> labbench-posttrain`):
+
+- **Upstream (`L5`)**: Consumes scheduled assay packets from [`labshift`](https://github.com/yaniguan/labshift) together with `parsed_spans.volume_ul` (and optional `rehearsal_steps`).
+- **Pre-Execution Twin Gate (`L4`)**: `process_packet(packet, *, memory_path=None)` deep-copies the `autolab-wire/v1` packet, bypasses already-halted packets unchanged, executes `RehearsalSession` (defaulting to an isolated temporary directory without touching tracked `demo/memory/runs.jsonl`, or persisting across multi-packet campaigns when `memory_path` / `rehearsal_memory_path` is provided), models 1- and 8-channel pipettes plus open-well volatile evaporation (`incubate`, `seal`, `thaw`), halts on any safety violation (`no_tip_reuse`, `no_overfill`, `enough_liquid`, `volume_in_range`, `tip_present`, `thawed_before_pipetting`, `unsealed_before_pipetting`, `high_temp_requires_seal`, `all_tips_dropped`) with `halt_reason = "L4_REHEARSAL_BLOCK"` and `protocol_yaml_dict = None`, and records Lean invariant `checkRehearsal_preserves_capacity` in `bottom_reasoning_traces`.
+- **Downstream (`L4` / `L1` / `L3`)**: Compiles approved multi-step trajectories (`transfer`, `distribute`, `mix`, `discard`, and `incubate`/`seal`/`thaw` delays/annotations) directly into `rehearsal.protocol_yaml_dict` (Opentrons Python API `2.16` specification) for [`lab-verify`](https://github.com/yaniguan/lab-verify) (`lean-mcp/v1` envelope minting) and [`stepbot`](https://github.com/yaniguan/stepbot) compilation, and feeds rehearsed step semantics downstream to [`twinstep`](https://github.com/yaniguan/twinstep) (`L3` causal ordering DAGs and seeded error twins).
+- **Post-Run `L4` Partner**: Pairs with [`lab-attrib`](https://github.com/yaniguan/lab-attrib) (`L4` post-execution 4-way causal blame, NNLS precursor deconvolution, and SHA-256 certified ledger) so transient `EXECUTION_ARTIFACT` hardware faults permit bounded clean retries while permanent safety violations are fast-denied and sub-linear structural skeleton/shingle recall flags isomorphic prior failures across `runs.jsonl`.
+
 ## Repository Layout
 
 ```text
@@ -27,6 +36,9 @@ lab-rehearsal/
 │   └── demo.yml                          # CI matrix (Python 3.10-3.12): pytest, output parity, catalog check
 ├── catalog/
 │   └── simulators.json                   # SPDX & license-governance manifest for datasets and simulators
+├── community_extensions/
+│   ├── calm_twin_calibrator.py           # Context-Adaptive Digital Twin (CALM-DT) & Rusty-SOP gate
+│   └── certified_negative_ledger.py      # 4-way causal attribution & hash-chained negative ledger
 ├── demo/
 │   ├── memory/
 │   │   └── runs.jsonl                    # Reference 2-pass structured episodic run history (12 runs)
@@ -41,6 +53,8 @@ lab-rehearsal/
 │   └── rehearse.py                       # CLI / showcase entrypoint wrapping lab_rehearsal
 ├── docs/
 │   └── ARCHITECTURE_AND_HISTORY.md       # Deep technical profile (Object, Data, Model, History)
+├── lean/
+│   └── LabRehearsalLean.lean             # Lean 4.36.0 capacity, conservation, rusty-SOP & attribution proofs
 ├── schema/
 │   ├── protocol.schema.json              # Strict JSON Schema for micro-step protocols
 │   └── run_record.schema.json            # Strict JSON Schema for episodic runs.jsonl records
@@ -53,7 +67,10 @@ lab-rehearsal/
 │   └── core.py                           # Quantitative deck twin, default-deny gate, and MemoryStore
 ├── tests/
 │   ├── fixtures/twinstep_twins.jsonl     # Corrupted/clean twinstep benchmark fixture
+│   ├── test_autolab_wire.py              # autolab-wire/v1 contract & L4_REHEARSAL_BLOCK unit tests
+│   ├── test_community_extensions.py      # CALM-DT, Rusty-SOP, and negative-ledger benchmark tests
 │   └── test_rehearse.py                  # Regression & unit test suite
+├── autolab_wire.py                       # L4 Auto-Lab 15-repo wire node (process_packet)
 ├── LICENSE                               # MIT License
 ├── pyproject.toml                        # Package metadata and console script
 ├── README.md                             # Overview, demo output, and curated simulation catalog

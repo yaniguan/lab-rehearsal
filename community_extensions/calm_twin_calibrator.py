@@ -9,17 +9,19 @@ reconfigurations ("rusty SOPs"). This module provides:
      evaporation rate directly from gravimetric/optical post-run readouts (zero retraining).
   2. A Rusty-SOP Rehearsal Gate blocking full-scale execution whenever an SOP exceeds
      `stale_days` or encounters a new `deck_epoch` until micro-rehearsal and Bottom
-     Reasoning Trace refresh succeed.
+     Reasoning Trace refresh succeed, with optional JSONL/JSON persistence.
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
+import os
+from pathlib import Path
 import random
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 
 @dataclass
@@ -45,6 +47,31 @@ class BottomReasoningTrace:
     calibrated_dead_vol_ul: float
     calibrated_evap_coeff: float
     trace_sha256: str
+    active_invariants: tuple[str, ...] = ("checkRehearsal_preserves_capacity",)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sop_id": self.sop_id,
+            "liquid_name": self.liquid_name,
+            "deck_epoch": int(self.deck_epoch),
+            "calibrated_dead_vol_ul": float(self.calibrated_dead_vol_ul),
+            "calibrated_evap_coeff": float(self.calibrated_evap_coeff),
+            "active_invariants": list(self.active_invariants),
+            "trace_sha256": self.trace_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> BottomReasoningTrace:
+        invs = data.get("active_invariants", ("checkRehearsal_preserves_capacity",))
+        return cls(
+            sop_id=str(data.get("sop_id", "")),
+            liquid_name=str(data.get("liquid_name", "buffer")),
+            deck_epoch=int(data["deck_epoch"]),
+            calibrated_dead_vol_ul=float(data.get("calibrated_dead_vol_ul", 5.0)),
+            calibrated_evap_coeff=float(data.get("calibrated_evap_coeff", 0.0)),
+            trace_sha256=str(data["trace_sha256"]),
+            active_invariants=tuple(str(x) for x in invs),
+        )
 
 
 @dataclass
@@ -72,7 +99,7 @@ class RustySopDecision:
 def compute_thermal_exposure(temp_c: float, open_duration_min: float) -> float:
     """Effective thermal evaporation exposure unit for heated open-well operations."""
     thermal_factor = 1.0 + max(0.0, temp_c - 20.0) / 18.0
-    return open_duration_min * thermal_factor
+    return max(0.0, open_duration_min) * thermal_factor
 
 
 class StaticNominalTwin:
@@ -108,14 +135,59 @@ class CalmAdaptiveTwin:
         obs_noise_var_evap: float = 0.015,
         ewma_alpha: float = 0.30,
         process_drift_var: float = 0.20,
+        state_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self.stale_days = stale_days
         self.obs_noise_var_dead = obs_noise_var_dead
         self.obs_noise_var_evap = obs_noise_var_evap
         self.ewma_alpha = ewma_alpha
         self.process_drift_var = process_drift_var
+        self.state_path = Path(state_path) if state_path is not None else None
         self._liquids: dict[str, LiquidPosteriorState] = {}
         self._sops: dict[str, SopMemoryRecord] = {}
+        if self.state_path is not None and self.state_path.exists():
+            self.load_state(self.state_path)
+
+    def save_state(self, path: str | os.PathLike[str] | None = None) -> None:
+        target = Path(path) if path is not None else self.state_path
+        if target is None:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "liquids": {k: asdict(v) for k, v in sorted(self._liquids.items())},
+            "sops": {
+                k: {
+                    "sop_id": v.sop_id,
+                    "liquid_name": v.liquid_name,
+                    "last_validated_day": v.last_validated_day,
+                    "validated_deck_epoch": v.validated_deck_epoch,
+                    "bottom_trace": v.bottom_trace.to_dict() if v.bottom_trace else None,
+                }
+                for k, v in sorted(self._sops.items())
+            },
+        }
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+
+    def load_state(self, path: str | os.PathLike[str] | None = None) -> None:
+        target = Path(path) if path is not None else self.state_path
+        if target is None or not target.exists():
+            return
+        data = json.loads(target.read_text(encoding="utf-8"))
+        self._liquids = {
+            k: LiquidPosteriorState(**v) for k, v in data.get("liquids", {}).items()
+        }
+        self._sops = {}
+        for k, v in data.get("sops", {}).items():
+            bt = v.get("bottom_trace")
+            self._sops[k] = SopMemoryRecord(
+                sop_id=str(v["sop_id"]),
+                liquid_name=str(v["liquid_name"]),
+                last_validated_day=int(v["last_validated_day"]),
+                validated_deck_epoch=int(v["validated_deck_epoch"]),
+                bottom_trace=BottomReasoningTrace.from_dict(bt) if isinstance(bt, Mapping) else None,
+            )
 
     def get_liquid_state(self, liquid_name: str) -> LiquidPosteriorState:
         if liquid_name not in self._liquids:
@@ -128,8 +200,12 @@ class CalmAdaptiveTwin:
         liquid_name: str,
         validated_day: int,
         deck_epoch: int,
+        *,
+        active_invariants: Sequence[str] = ("checkRehearsal_preserves_capacity",),
     ) -> SopMemoryRecord:
-        trace = self._mint_bottom_trace(sop_id, liquid_name, deck_epoch)
+        trace = self._mint_bottom_trace(
+            sop_id, liquid_name, deck_epoch, active_invariants=active_invariants
+        )
         rec = SopMemoryRecord(
             sop_id=sop_id,
             liquid_name=liquid_name,
@@ -138,6 +214,7 @@ class CalmAdaptiveTwin:
             bottom_trace=trace,
         )
         self._sops[sop_id] = rec
+        self.save_state()
         return rec
 
     def _mint_bottom_trace(
@@ -145,8 +222,11 @@ class CalmAdaptiveTwin:
         sop_id: str,
         liquid_name: str,
         deck_epoch: int,
+        *,
+        active_invariants: Sequence[str] = ("checkRehearsal_preserves_capacity",),
     ) -> BottomReasoningTrace:
         st = self.get_liquid_state(liquid_name)
+        inv_tuple = tuple(str(x) for x in active_invariants)
         payload = json.dumps(
             {
                 "sop_id": sop_id,
@@ -154,6 +234,7 @@ class CalmAdaptiveTwin:
                 "deck_epoch": deck_epoch,
                 "dead_vol_ul": round(st.dead_vol_mean_ul, 4),
                 "evap_coeff": round(st.evap_coeff_mean_ul_per_unit, 5),
+                "active_invariants": list(inv_tuple),
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -165,6 +246,7 @@ class CalmAdaptiveTwin:
             calibrated_dead_vol_ul=round(st.dead_vol_mean_ul, 4),
             calibrated_evap_coeff=round(st.evap_coeff_mean_ul_per_unit, 5),
             trace_sha256=digest,
+            active_invariants=inv_tuple,
         )
 
     def predict_recoverable_volume_ul(
@@ -257,6 +339,7 @@ class CalmAdaptiveTwin:
             (1.0 - self.ewma_alpha) * st.ewma_residual_ul + self.ewma_alpha * raw_res
         )
         st.observations += 1
+        self.save_state()
         return st
 
     def check_rusty_sop_gate(
@@ -326,6 +409,7 @@ class CalmAdaptiveTwin:
         rec.last_validated_day = current_day
         rec.validated_deck_epoch = live_deck_epoch
         rec.bottom_trace = new_trace
+        self.save_state()
         return RustySopDecision(
             sop_id=sop_id,
             is_rusty=True,
