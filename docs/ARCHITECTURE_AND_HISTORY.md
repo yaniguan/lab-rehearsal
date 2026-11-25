@@ -52,8 +52,10 @@ Five hand-authored deterministic JSON liquid-handling protocols test positive ex
   ```
 - `demo/output.txt` records the reference 77-line console output from Linux CPU execution (`2026-11-18`).
 
-### Curated External Datasets and License Posture
-`README.md` indexes 4 external embodied-lab simulation benchmarks (`LabUtopia`, `AutoBio`, `Chemistry3D`, `Labimus`), 10 open-source robotics/lab-automation repositories (`genesis-world`, `lerobot`, `mujoco`, `IsaacLab`, `ManiSkill`, `pylabrobot`, `opentrons`, `AutoBio`, `Chemistry3D`, `LabUtopia`), and 10 papers (`2017`–`2026`). No external dataset files are copied into the repository (`zero-redistribution`); license gaps on upstream benchmarks (`AutoBio` and `Chemistry3D` lacking repository `LICENSE` files) are explicitly flagged in `README.md`.
+### Curated External Datasets, License Governance, and Open-Protocol Converters (`2024`–`2026`)
+`catalog/simulators.json` and `README.md` index 14 external wet-lab protocol and embodied-lab simulation datasets (`Opentrons Shared Protocol Fixtures`, `Opentrons Protocol Library`, `FineBio`, `BioPlanner`, `BioProBench`, `LAB-Bench ProtocolQA`, `SciKnowEval`, `EmbodiedLab`, `MATTERIX`, `WETOP-Bench`, `LabUtopia`, `AutoBio`, `Chemistry3D`, `Labimus`), 18 open-source robotics/lab-automation repositories, and 12 papers (`2017`–`2026`), validated by `scripts/check_catalog.py`:
+- **Zero-Redistribution & SPDX / `eval_only` Gates**: No external dataset payloads are vendored into the repository. `lab_rehearsal.open_datasets.check_dataset_ingestion_policy` enforces `eval_only` benchmark contamination guards (blocking `purpose="training"` on evaluation benchmarks such as `BioProBench`, `LAB-Bench`, `BioPlanner`, `SciKnowEval`, `EmbodiedLab`, and `WETOP-Bench`), `commercial_use_ok` gates (blocking non-commercial `CC-BY-NC-4.0`, `LicenseRef-FineBio-NC`, and `NOASSERTION` entries when commercial clearance is required), and `redistribution_ok` guards.
+- **Multi-Dataset Protocol Ingestion (`src/lab_rehearsal/open_datasets.py`, `scripts/fetch_open_protocols.py`)**: Deterministically lowers Opentrons JSON `v6`/`v7`/`v8` & `protoBuilds` Python AST calls (`from_opentrons_json`), EMNLP `BioPlanner`/`BioProt` reaction pseudocode & WLP action dictionaries (`from_bioplanner`), CVPR 2024 / IJCV 2025 `FineBio` `verb-manipulated-affected` atomic plunger/vessel traces (`from_finebio_trace`), and ICML 2026 `BioProBench` `ORD`/`ERR` & `LAB-Bench` `ProtocolQA` procedures (`from_bioprobench`) into schema-validated `lab-rehearsal` twin step lists for 96-well dry-run verification.
 
 ---
 
@@ -97,6 +99,8 @@ Approves a protocol (`approved = True`) if and only if `bool(trace) and checked 
 | Commit | Date | Author | Branch / Ref | Summary |
 |---|---|---|---|---|
 | `8219695` (`82196953452df408ecb8bf51952933f04fc9c387`) | `2026-11-18` | Yani Guan | `main` | Initial commit (`Add curated resources and first demo`): introduced the 5-stage `recall -> rehearse -> verify -> run -> write_back` liquid-handling loop (`demo/rehearse.py`), 5 JSON protocol fixtures (`4` broken, `1` good 43-step serial dilution), 2-pass episodic trace (`demo/memory/runs.jsonl`, `demo/output.txt`), GitHub Actions workflow (`.github/workflows/demo.yml`), and curated simulation datasets, repositories, and papers (`2017`–`2026`). |
+| `9f64121` | `2026-11-25` | Yani Guan | `main` (PR #30) | Phase-2 audit resolution (`#24`–`#29`) and `autolab-wire/v1` L4 integration (`autolab_wire.py`, Lean 4.36.0 tenth-microliter proofs, 8-channel manifold & volatile evaporation twin, sub-linear MinHash LSH recall). |
+| `HEAD` | `2026-11-25` | Yani Guan | `feat/open-datasets-2026` | Expanded `catalog/simulators.json` to 14 datasets & 18 repositories (`2024`–`2026`, with SPDX, `commercial_use_ok`, and `eval_only` governance), added `src/lab_rehearsal/open_datasets.py` and `scripts/fetch_open_protocols.py` for Opentrons JSON v6/v7, BioPlanner/WLP, FineBio, and BioProBench/ProtocolQA twin rehearsal, plus `tests/test_open_datasets_2026.py`. |
 
 ---
 
