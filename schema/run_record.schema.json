@@ -27,6 +27,46 @@
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "steps_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "env_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "skeleton_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "shingles": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+    },
+    "deck_epoch": { "type": ["integer", "null"], "minimum": 0 },
+    "bottom_trace": {
+      "type": ["object", "null"],
+      "required": ["deck_epoch", "trace_sha256"],
+      "properties": {
+        "sop_id": { "type": "string" },
+        "liquid_name": { "type": "string" },
+        "deck_epoch": { "type": "integer", "minimum": 0 },
+        "calibrated_dead_vol_ul": { "type": "number", "minimum": 0 },
+        "calibrated_evap_coeff": { "type": "number", "minimum": 0 },
+        "liquid_calibrations": { "type": "object" },
+        "active_invariants": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "trace_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "attribution_outcome": {
+      "type": ["string", "null"],
+      "enum": [
+        "EXECUTION_ARTIFACT",
+        "AMBIGUOUS_CHARACTERIZATION",
+        "CERTIFIED_POSITIVE",
+        "CERTIFIED_NEGATIVE",
+        null
+      ]
+    },
+    "retry_count": { "type": "integer", "minimum": 0 },
+    "retry_of_run_uuid": { "type": ["string", "null"], "minLength": 8 },
+    "certified_receipt_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "rules_version": { "type": "string", "minLength": 1 },
     "verify_passed": { "type": "boolean" },
     "run_passed": { "type": ["boolean", "null"] },

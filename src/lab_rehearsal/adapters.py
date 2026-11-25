@@ -7,7 +7,15 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from .core import DEFAULT_DECK_SPEC, DeckSpec, rehearse, verify
+from .core import (
+    DEFAULT_DECK_SPEC,
+    VOL_EPS,
+    DeckSpec,
+    _clean_vol,
+    rehearse,
+    to_tenths_exact,
+    verify,
+)
 
 DEFAULT_TWINSTEP_LOC_MAP: dict[str, str] = {
     "reservoir:buffer": "res:1",
@@ -20,7 +28,15 @@ DEFAULT_TWINSTEP_LOC_MAP: dict[str, str] = {
     "reservoir:stop": "res:4",
     "waste": "res:12",
     "trash": "trash:1",
+    "fixed_trash": "trash:1",
 }
+
+_COMMENT_SEAL_RE = re.compile(r"^seal\s+(\S+)$", re.IGNORECASE)
+_COMMENT_THAW_RE = re.compile(r"^thaw\s+(\S+)$", re.IGNORECASE)
+_COMMENT_INCUBATE_RE = re.compile(
+    r"^incubate\s+(\S+)\s+at\s+([+-]?\d+(?:\.\d+)?)C\s+for\s+(\d+(?:\.\d+)?)s$",
+    re.IGNORECASE,
+)
 
 
 def _normalize_loc(raw_loc: str, loc_map: Mapping[str, str] | None = None) -> str:
@@ -29,6 +45,18 @@ def _normalize_loc(raw_loc: str, loc_map: Mapping[str, str] | None = None) -> st
         merged.update(loc_map)
     if raw_loc in merged:
         return merged[raw_loc]
+    if raw_loc == "plate":
+        return "plate"
+    # Normalize Opentrons API 2.16 wire slots: `2:A1..A12` -> `res:1..12`, `3:A1..H12` -> `plate:A1..H12`
+    m_wire_res = re.match(r"^(?:slot_)?2:[A-H](1[0-2]|[1-9])$", raw_loc)
+    if m_wire_res:
+        return f"res:{m_wire_res.group(1)}"
+    m_wire_plate = re.match(r"^(?:slot_)?3:([A-H](?:1[0-2]|[1-9]))$", raw_loc)
+    if m_wire_plate:
+        return f"plate:{m_wire_plate.group(1)}"
+    m_wire_tip = re.match(r"^(?:slot_)?1:([A-H](?:1[0-2]|[1-9]))$", raw_loc)
+    if m_wire_tip:
+        return f"tiprack:{m_wire_tip.group(1)}"
     # Normalize `plate1:A1` -> `plate:A1`, `reservoir:A1`..`reservoir:A12` -> `res:1`..`res:12`
     m_plate = re.match(r"^plate\d*:([A-H](?:1[0-2]|[1-9]))$", raw_loc)
     if m_plate:
@@ -42,6 +70,30 @@ def _normalize_loc(raw_loc: str, loc_map: Mapping[str, str] | None = None) -> st
     return raw_loc
 
 
+def _to_wire_well(loc: str) -> str:
+    """Map `lab-rehearsal` container IDs onto Opentrons API 2.16 wire slot coordinates."""
+    if loc == "plate":
+        return "3:A1"
+    m_res = re.match(r"^res:(1[0-2]|[1-9])$", loc)
+    if m_res:
+        return f"2:A{m_res.group(1)}"
+    m_plate = re.match(r"^plate:([A-H](?:1[0-2]|[1-9]))$", loc)
+    if m_plate:
+        return f"3:{m_plate.group(1)}"
+    if loc == "trash:1":
+        return "trash"
+    return loc
+
+
+def _to_stepbot_alias_well(loc: str) -> str:
+    if loc == "plate":
+        return "plate:A1"
+    m_res = re.match(r"^res:(1[0-2]|[1-9])$", loc)
+    if m_res:
+        return f"reservoir:A{m_res.group(1)}"
+    return loc
+
+
 def _vol_to_ul(vol: float, unit: str = "uL") -> float:
     if unit == "mL":
         return float(vol) * 1000.0
@@ -50,17 +102,31 @@ def _vol_to_ul(vol: float, unit: str = "uL") -> float:
     raise ValueError(f"unsupported volume unit: {unit!r}")
 
 
+def _extract_twinstep_loc(step: Mapping[str, Any], loc_map: Mapping[str, str] | None) -> str:
+    if "well" in step and step["well"]:
+        return _normalize_loc(str(step["well"]), loc_map)
+    if "loc" in step and step["loc"]:
+        return _normalize_loc(str(step["loc"]), loc_map)
+    if "plate" in step and step["plate"]:
+        raw_p = str(step["plate"])
+        if raw_p == "plate":
+            return "plate"
+        if ":" in raw_p:
+            return _normalize_loc(raw_p, loc_map)
+        return _normalize_loc(f"{raw_p}:A1", loc_map)
+    return "plate:A1"
+
+
 def from_twinstep(
     protocol_or_steps: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     *,
     loc_map: Mapping[str, str] | None = None,
     tip_policy: str = "per_transfer",
 ) -> list[dict[str, Any]]:
-    """Lower `twinstep` macro-steps (`transfer`, `mix`, `wash`) into `lab-rehearsal` micro-steps.
+    """Lower `twinstep` macro-steps (`transfer`, `mix`, `wash`, `incubate`, `seal`, `thaw`) into micro-steps.
 
-    Non-pipetting steps (`incubate`, `read`) are ignored during liquid-handling lowering.
-    `tip_policy="per_transfer"` wraps each transfer/mix block cleanly; `tip_policy="smart"`
-    reuses tips across identical clean sources or downstream serial transfers.
+    Optical `read` steps do not mutate liquid state and are skipped cleanly. Any mounted tip
+    is dropped before `incubate`, `seal`, or `thaw` transitions.
     """
     if isinstance(protocol_or_steps, Mapping):
         raw_steps = protocol_or_steps.get("steps", [])
@@ -82,6 +148,13 @@ def from_twinstep(
         if not tip_on:
             micro.append({"op": "pick_up_tip"})
             tip_on = True
+
+    def drop_if_mounted() -> None:
+        nonlocal tip_on, last_src, last_dst
+        if tip_on:
+            micro.append({"op": "drop_tip"})
+            tip_on = False
+        last_src, last_dst = None, None
 
     for step in raw_steps:
         if not isinstance(step, Mapping):
@@ -132,7 +205,34 @@ def from_twinstep(
                 tip_on = False
                 last_src, last_dst = None, None
 
-        elif stype in ("incubate", "read"):
+        elif stype == "incubate":
+            drop_if_mounted()
+            loc = _extract_twinstep_loc(step, loc_map)
+            temp_c = float(step.get("temp_c", step.get("temperature", step.get("temp", 37.0))))
+            if "duration_s" in step:
+                dur_s = float(step["duration_s"])
+            elif "duration_sec" in step:
+                dur_s = float(step["duration_sec"])
+            elif "duration_min" in step:
+                dur_s = float(step["duration_min"]) * 60.0
+            elif "duration" in step:
+                mult = 60.0 if str(step.get("unit", "s")).lower() in ("min", "minutes", "m") else 1.0
+                dur_s = float(step["duration"]) * mult
+            else:
+                dur_s = 60.0
+            micro.append({"op": "incubate", "loc": loc, "temp_c": temp_c, "duration_s": dur_s})
+
+        elif stype in ("seal", "seal_well", "sealWell"):
+            drop_if_mounted()
+            loc = _extract_twinstep_loc(step, loc_map)
+            micro.append({"op": "seal", "loc": loc})
+
+        elif stype in ("thaw", "thaw_well", "thawWell"):
+            drop_if_mounted()
+            loc = _extract_twinstep_loc(step, loc_map)
+            micro.append({"op": "thaw", "loc": loc})
+
+        elif stype == "read":
             continue
         else:
             raise ValueError(f"unsupported twinstep step type: {stype!r}")
@@ -143,7 +243,7 @@ def from_twinstep(
 
 
 def to_twinstep(steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Lift `lab-rehearsal` micro-steps into `twinstep` `transfer` and `mix` steps."""
+    """Lift `lab-rehearsal` micro-steps into `twinstep` macro-steps (`transfer`, `mix`, `incubate`, `seal`, `thaw`)."""
     out: list[dict[str, Any]] = []
     i = 0
     n = len(steps)
@@ -153,23 +253,47 @@ def to_twinstep(steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         if op in ("pick_up_tip", "drop_tip"):
             i += 1
             continue
-        if (
-            op == "aspirate"
-            and i + 1 < n
-            and steps[i + 1].get("op") == "dispense"
-            and float(s.get("vol", 0)) == float(steps[i + 1].get("vol", -1))
-        ):
-            out.append(
-                {
-                    "type": "transfer",
-                    "source": str(s["loc"]),
-                    "dest": str(steps[i + 1]["loc"]),
-                    "volume": float(s["vol"]),
-                    "unit": "uL",
-                }
-            )
-            i += 2
-            continue
+        if op == "aspirate":
+            src = str(s["loc"])
+            asp_vol = float(s["vol"])
+            if (
+                i + 1 < n
+                and steps[i + 1].get("op") == "dispense"
+                and abs(asp_vol - float(steps[i + 1].get("vol", -1))) <= 1e-6
+            ):
+                out.append(
+                    {
+                        "type": "transfer",
+                        "source": src,
+                        "dest": str(steps[i + 1]["loc"]),
+                        "volume": asp_vol,
+                        "unit": "uL",
+                    }
+                )
+                i += 2
+                continue
+            # Support multi-dispense sequences (`aspirate V` -> `dispense v1` .. `dispense vk`)
+            j = i + 1
+            disp_sum = 0.0
+            sub_disps: list[tuple[str, float]] = []
+            while j < n and steps[j].get("op") == "dispense":
+                dv = float(steps[j]["vol"])
+                sub_disps.append((str(steps[j]["loc"]), dv))
+                disp_sum += dv
+                j += 1
+            if sub_disps and disp_sum <= asp_vol + 1e-6:
+                for dst_loc, dv in sub_disps:
+                    out.append(
+                        {
+                            "type": "transfer",
+                            "source": src,
+                            "dest": dst_loc,
+                            "volume": dv,
+                            "unit": "uL",
+                        }
+                    )
+                i = j
+                continue
         if op == "mix":
             out.append(
                 {
@@ -180,6 +304,25 @@ def to_twinstep(steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     "cycles": int(s.get("reps", 1)),
                 }
             )
+            i += 1
+            continue
+        if op == "incubate":
+            out.append(
+                {
+                    "type": "incubate",
+                    "well": str(s["loc"]),
+                    "temp_c": float(s["temp_c"]),
+                    "duration_s": float(s["duration_s"]),
+                }
+            )
+            i += 1
+            continue
+        if op == "seal":
+            out.append({"type": "seal", "well": str(s["loc"])})
+            i += 1
+            continue
+        if op == "thaw":
+            out.append({"type": "thaw", "well": str(s["loc"])})
             i += 1
             continue
         raise ValueError(f"cannot lift unpaired micro-step at index {i + 1}: {s!r}")
@@ -195,10 +338,48 @@ def _advance_well_across_row(first_well: str, offset: int) -> str:
     return f"{prefix}:{row}{col}"
 
 
+def _parse_pipette_model_bounds(model_str: str, explicit_channels: Any = None) -> tuple[float, float, int]:
+    m = model_str.lower()
+    pip_min, pip_max = DEFAULT_DECK_SPEC.pip_min, DEFAULT_DECK_SPEC.pip_max
+    if "p20_" in m or m == "p20" or "p20" in m:
+        pip_min, pip_max = 1.0, 20.0
+    elif "p50_" in m or m == "p50":
+        pip_min, pip_max = 5.0, 50.0
+    elif "p300_" in m or m == "p300" or "p300" in m:
+        pip_min, pip_max = 20.0, 300.0
+    elif "p1000_" in m or m == "p1000" or "p1000" in m:
+        pip_min, pip_max = 100.0, 1000.0
+
+    channels = 8 if "multi" in m else 1
+    if isinstance(explicit_channels, int) and not isinstance(explicit_channels, bool) and explicit_channels in (1, 8):
+        channels = explicit_channels
+    return pip_min, pip_max, channels
+
+
+def _extract_stepbot_step_kind_and_cfg(raw_step: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    if "action" in raw_step:
+        kind = str(raw_step["action"])
+        cfg = {k: v for k, v in raw_step.items() if k != "action"}
+        return kind, cfg
+    if "type" in raw_step:
+        kind = str(raw_step["type"])
+        cfg = {k: v for k, v in raw_step.items() if k != "type"}
+        return kind, cfg
+    if len(raw_step) == 1:
+        k, v = next(iter(raw_step.items()))
+        if isinstance(v, Mapping):
+            return str(k), dict(v)
+        if k == "comment":
+            return "comment", {"text": str(v)}
+        if k in ("delay", "pause") and isinstance(v, (int, float)):
+            return str(k), {"seconds": float(v)}
+    return "", {}
+
+
 def from_stepbot(
     spec_data: str | Path | Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], DeckSpec]:
-    """Compile a `stepbot` YAML/dict specification into `(micro_steps, DeckSpec)`."""
+    """Compile a `stepbot` YAML/dict specification (including `autolab-wire/v1` dicts) into `(micro_steps, DeckSpec)`."""
     if isinstance(spec_data, (str, Path)):
         text = Path(spec_data).read_text(encoding="utf-8") if Path(str(spec_data)).exists() else str(spec_data)
         try:
@@ -213,17 +394,32 @@ def from_stepbot(
     if not isinstance(doc, Mapping):
         raise ValueError("stepbot specification must be a mapping")
 
-    pip_min, pip_max = DEFAULT_DECK_SPEC.pip_min, DEFAULT_DECK_SPEC.pip_max
+    pipette_specs: dict[str, tuple[float, float, int]] = {}
     pipettes = doc.get("pipettes", {})
     if isinstance(pipettes, Mapping) and pipettes:
-        first_pip = next(iter(pipettes.values()))
-        model = str(first_pip.get("model", "p300_single_gen2")).lower()
-        if "p20_" in model or model == "p20":
-            pip_min, pip_max = 1.0, 20.0
-        elif "p300_" in model or model == "p300":
-            pip_min, pip_max = 20.0, 300.0
-        elif "p1000_" in model or model == "p1000":
-            pip_min, pip_max = 100.0, 1000.0
+        for mount, pentry in pipettes.items():
+            if not isinstance(pentry, Mapping):
+                continue
+            raw_model = str(
+                pentry.get("model")
+                or pentry.get("instrument_name")
+                or pentry.get("name")
+                or "p300_single_gen2"
+            )
+            pipette_specs[str(mount)] = _parse_pipette_model_bounds(
+                raw_model, pentry.get("channels")
+            )
+
+    if pipette_specs:
+        default_mount = next(iter(pipette_specs))
+        pip_min, pip_max, default_channels = pipette_specs[default_mount]
+    else:
+        default_mount = "left"
+        pip_min, pip_max, default_channels = (
+            DEFAULT_DECK_SPEC.pip_min,
+            DEFAULT_DECK_SPEC.pip_max,
+            1,
+        )
 
     start_map: dict[str, tuple[float, str]] = {}
     diluents = set(DEFAULT_DECK_SPEC.diluents)
@@ -232,7 +428,7 @@ def from_stepbot(
         for liq_name, lspec in liquids.items():
             if not isinstance(lspec, Mapping):
                 continue
-            wells_raw = lspec.get("wells", [])
+            wells_raw = lspec.get("wells", lspec.get("well", []))
             wells_list = [wells_raw] if isinstance(wells_raw, str) else list(wells_raw)
             vol = float(lspec.get("volume", 0.0))
             for w in wells_list:
@@ -241,88 +437,274 @@ def from_stepbot(
             if str(liq_name).lower() in ("buffer", "water", "pbs", "diluent"):
                 diluents.add(str(liq_name).lower())
 
+    multi_mount = len(pipette_specs) > 1
     deck_spec = DeckSpec(
         well_max=DEFAULT_DECK_SPEC.well_max,
         res_max=DEFAULT_DECK_SPEC.res_max,
         pip_min=pip_min,
         pip_max=pip_max,
+        channels=default_channels,
+        pipettes=pipette_specs if multi_mount else {},
         start=start_map if start_map else dict(DEFAULT_DECK_SPEC.start),
         diluents=frozenset(diluents),
     )
 
+    def _step_meta(cfg: Mapping[str, Any]) -> dict[str, Any]:
+        mount = str(cfg.get("pipette", default_mount))
+        _, _, ch = pipette_specs.get(mount, (pip_min, pip_max, default_channels))
+        if isinstance(cfg.get("channels"), int) and not isinstance(cfg.get("channels"), bool):
+            ch = int(cfg["channels"])
+        meta: dict[str, Any] = {}
+        if ch == 8:
+            meta["channels"] = 8
+        if multi_mount and mount in pipette_specs:
+            meta["pipette"] = mount
+        return meta
+
     micro: list[dict[str, Any]] = []
-    for raw_step in doc.get("steps", []):
+    tip_mounted = False
+    tip_meta: dict[str, Any] = {}
+    raw_steps_list = list(doc.get("steps", []))
+    idx_s = 0
+    while idx_s < len(raw_steps_list):
+        raw_step = raw_steps_list[idx_s]
         if not isinstance(raw_step, Mapping):
+            idx_s += 1
             continue
-        if "comment" in raw_step or "delay" in raw_step or "pause" in raw_step:
+        kind, cfg = _extract_stepbot_step_kind_and_cfg(raw_step)
+
+        if kind == "comment":
+            text = str(cfg.get("text", cfg.get("message", ""))).strip()
+            m_seal = _COMMENT_SEAL_RE.match(text)
+            if m_seal:
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+                micro.append({"op": "seal", "loc": _normalize_loc(m_seal.group(1))})
+                idx_s += 1
+                continue
+            m_thaw = _COMMENT_THAW_RE.match(text)
+            if m_thaw:
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+                micro.append({"op": "thaw", "loc": _normalize_loc(m_thaw.group(1))})
+                idx_s += 1
+                continue
+            m_inc = _COMMENT_INCUBATE_RE.match(text)
+            if m_inc:
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+                inc_loc = _normalize_loc(m_inc.group(1))
+                inc_temp = float(m_inc.group(2))
+                inc_dur = float(m_inc.group(3))
+                # Consume paired `delay` step immediately following an incubate annotation
+                if idx_s + 1 < len(raw_steps_list) and isinstance(raw_steps_list[idx_s + 1], Mapping):
+                    next_kind, _ = _extract_stepbot_step_kind_and_cfg(raw_steps_list[idx_s + 1])
+                    if next_kind == "delay":
+                        idx_s += 1
+                micro.append(
+                    {
+                        "op": "incubate",
+                        "loc": inc_loc,
+                        "temp_c": inc_temp,
+                        "duration_s": inc_dur,
+                    }
+                )
+                idx_s += 1
+                continue
+            idx_s += 1
             continue
-        if "pick_up_tip" in raw_step:
-            micro.append({"op": "pick_up_tip"})
-        elif "drop_tip" in raw_step:
-            micro.append({"op": "drop_tip"})
-        elif "transfer" in raw_step:
-            cfg = raw_step["transfer"]
-            srcs = [cfg["source"]] if isinstance(cfg["source"], str) else list(cfg["source"])
-            dsts = [cfg["dest"]] if isinstance(cfg["dest"], str) else list(cfg["dest"])
+
+        if kind in ("delay", "pause"):
+            idx_s += 1
+            continue
+
+        meta = _step_meta(cfg)
+
+        if kind == "pick_up_tip":
+            p_step: dict[str, Any] = {"op": "pick_up_tip", **meta}
+            if "loc" in cfg and cfg["loc"]:
+                p_step["loc"] = _normalize_loc(str(cfg["loc"]))
+            micro.append(p_step)
+            tip_mounted = True
+            tip_meta = dict(meta)
+
+        elif kind == "drop_tip":
+            micro.append({"op": "drop_tip", **meta})
+            tip_mounted = False
+            tip_meta = {}
+
+        elif kind == "incubate":
+            if tip_mounted:
+                micro.append({"op": "drop_tip", **tip_meta})
+                tip_mounted = False
+            w_raw = cfg.get("well", cfg.get("loc", cfg.get("wells", "plate:A1")))
+            dur_s = float(cfg.get("duration_s", float(cfg.get("minutes", 0.0)) * 60.0 + float(cfg.get("seconds", 0.0))))
+            micro.append(
+                {
+                    "op": "incubate",
+                    "loc": _normalize_loc(str(w_raw)),
+                    "temp_c": float(cfg.get("temp_c", cfg.get("temperature", 37.0))),
+                    "duration_s": dur_s if dur_s > 0 else 60.0,
+                }
+            )
+
+        elif kind in ("seal", "sealWell"):
+            if tip_mounted:
+                micro.append({"op": "drop_tip", **tip_meta})
+                tip_mounted = False
+            w_raw = cfg.get("well", cfg.get("loc", cfg.get("wells", "plate:A1")))
+            micro.append({"op": "seal", "loc": _normalize_loc(str(w_raw))})
+
+        elif kind in ("thaw", "thawWell"):
+            if tip_mounted:
+                micro.append({"op": "drop_tip", **tip_meta})
+                tip_mounted = False
+            w_raw = cfg.get("well", cfg.get("loc", cfg.get("wells", "plate:A1")))
+            micro.append({"op": "thaw", "loc": _normalize_loc(str(w_raw))})
+
+        elif kind == "transfer":
+            raw_src = cfg.get("source", cfg.get("src"))
+            raw_dst = cfg.get("dest", cfg.get("dst", cfg.get("destination")))
+            srcs = [raw_src] if isinstance(raw_src, str) else list(raw_src)  # type: ignore[arg-type]
+            dsts = [raw_dst] if isinstance(raw_dst, str) else list(raw_dst)  # type: ignore[arg-type]
+            if len(srcs) == 1 and len(dsts) > 1:
+                srcs = srcs * len(dsts)
+            elif len(dsts) == 1 and len(srcs) > 1:
+                dsts = dsts * len(srcs)
             vol = float(cfg["volume"])
             new_tip = str(cfg.get("new_tip", "once"))
             mix_after = cfg.get("mix_after")
+
             if new_tip == "once":
-                micro.append({"op": "pick_up_tip"})
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                micro.append({"op": "pick_up_tip", **meta})
+                tip_mounted = False
+            elif new_tip == "never":
+                if not tip_mounted:
+                    micro.append({"op": "pick_up_tip", **meta})
+                    tip_mounted = True
+                    tip_meta = dict(meta)
+            elif new_tip == "always":
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+
             for src, dst in zip(srcs, dsts):
                 if new_tip == "always":
-                    micro.append({"op": "pick_up_tip"})
+                    micro.append({"op": "pick_up_tip", **meta})
                 nsrc = _normalize_loc(str(src))
                 ndst = _normalize_loc(str(dst))
-                micro.append({"op": "aspirate", "loc": nsrc, "vol": vol})
-                micro.append({"op": "dispense", "loc": ndst, "vol": vol})
+                micro.append({"op": "aspirate", "loc": nsrc, "vol": vol, **meta})
+                micro.append({"op": "dispense", "loc": ndst, "vol": vol, **meta})
                 if isinstance(mix_after, Mapping):
                     micro.append(
                         {
                             "op": "mix",
                             "loc": ndst,
                             "vol": float(mix_after["volume"]),
-                            "reps": int(mix_after["reps"]),
+                            "reps": int(mix_after.get("reps", mix_after.get("repetitions", 1))),
+                            **meta,
                         }
                     )
                 if new_tip == "always":
-                    micro.append({"op": "drop_tip"})
+                    micro.append({"op": "drop_tip", **meta})
             if new_tip == "once":
-                micro.append({"op": "drop_tip"})
-        elif "distribute" in raw_step:
-            cfg = raw_step["distribute"]
-            nsrc = _normalize_loc(str(cfg["source"]))
-            dsts = [cfg["dest"]] if isinstance(cfg["dest"], str) else list(cfg["dest"])
+                micro.append({"op": "drop_tip", **meta})
+
+        elif kind == "distribute":
+            raw_src = cfg.get("source", cfg.get("src"))
+            raw_dst = cfg.get("dest", cfg.get("dst", cfg.get("destination")))
+            nsrc = _normalize_loc(str(raw_src))
+            dsts = [raw_dst] if isinstance(raw_dst, str) else list(raw_dst)  # type: ignore[arg-type]
             vol = float(cfg["volume"])
-            micro.append({"op": "pick_up_tip"})
-            for dst in dsts:
-                ndst = _normalize_loc(str(dst))
-                micro.append({"op": "aspirate", "loc": nsrc, "vol": vol})
-                micro.append({"op": "dispense", "loc": ndst, "vol": vol})
-            micro.append({"op": "drop_tip"})
-        elif "mix" in raw_step:
-            cfg = raw_step["mix"]
-            wells = [cfg["wells"]] if isinstance(cfg["wells"], str) else list(cfg["wells"])
+            new_tip = str(cfg.get("new_tip", "once"))
+            if new_tip == "once":
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                micro.append({"op": "pick_up_tip", **meta})
+                tip_mounted = False
+            elif new_tip == "never" and not tip_mounted:
+                micro.append({"op": "pick_up_tip", **meta})
+                tip_mounted = True
+                tip_meta = dict(meta)
+
+            total_v = _clean_vol(vol * len(dsts))
+            if len(dsts) >= 2 and total_v <= pip_max + VOL_EPS:
+                micro.append({"op": "aspirate", "loc": nsrc, "vol": total_v, **meta})
+                for dst in dsts:
+                    ndst = _normalize_loc(str(dst))
+                    micro.append(
+                        {"op": "dispense", "loc": ndst, "vol": vol, "air_dispense": True, **meta}
+                    )
+            else:
+                for dst in dsts:
+                    ndst = _normalize_loc(str(dst))
+                    micro.append({"op": "aspirate", "loc": nsrc, "vol": vol, **meta})
+                    micro.append({"op": "dispense", "loc": ndst, "vol": vol, **meta})
+
+            if new_tip == "once":
+                micro.append({"op": "drop_tip", **meta})
+
+        elif kind == "mix":
+            raw_wells = cfg.get("wells", cfg.get("well"))
+            wells = [raw_wells] if isinstance(raw_wells, str) else list(raw_wells)  # type: ignore[arg-type]
             vol = float(cfg["volume"])
-            reps = int(cfg.get("reps", 3))
-            for w in wells:
-                micro.append({"op": "pick_up_tip"})
-                micro.append({"op": "mix", "loc": _normalize_loc(str(w)), "vol": vol, "reps": reps})
-                micro.append({"op": "drop_tip"})
-        elif "discard" in raw_step:
-            cfg = raw_step["discard"]
-            nsrc = _normalize_loc(str(cfg["source"]))
+            reps = int(cfg.get("reps", cfg.get("repetitions", cfg.get("cycles", 3))))
+            new_tip = str(cfg.get("new_tip", "once"))
+            if new_tip == "never":
+                if not tip_mounted:
+                    micro.append({"op": "pick_up_tip", **meta})
+                    tip_mounted = True
+                    tip_meta = dict(meta)
+                for w in wells:
+                    micro.append({"op": "mix", "loc": _normalize_loc(str(w)), "vol": vol, "reps": reps, **meta})
+            elif new_tip == "once":
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+                micro.append({"op": "pick_up_tip", **meta})
+                for w in wells:
+                    micro.append({"op": "mix", "loc": _normalize_loc(str(w)), "vol": vol, "reps": reps, **meta})
+                micro.append({"op": "drop_tip", **meta})
+            else:
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+                for w in wells:
+                    micro.append({"op": "pick_up_tip", **meta})
+                    micro.append({"op": "mix", "loc": _normalize_loc(str(w)), "vol": vol, "reps": reps, **meta})
+                    micro.append({"op": "drop_tip", **meta})
+
+        elif kind == "discard":
+            raw_src = cfg.get("source", cfg.get("src"))
+            nsrc = _normalize_loc(str(raw_src))
             vol = float(cfg["volume"])
-            micro.append({"op": "pick_up_tip"})
-            micro.append({"op": "aspirate", "loc": nsrc, "vol": vol})
-            micro.append({"op": "dispense", "loc": "trash:1", "vol": vol})
-            micro.append({"op": "drop_tip"})
-        elif "dilution_series" in raw_step:
-            cfg = raw_step["dilution_series"]
-            nsrc = _normalize_loc(str(cfg["source"]))
+            new_tip = str(cfg.get("new_tip", "once"))
+            if new_tip == "never":
+                if not tip_mounted:
+                    micro.append({"op": "pick_up_tip", **meta})
+                    tip_mounted = True
+                    tip_meta = dict(meta)
+                micro.append({"op": "aspirate", "loc": nsrc, "vol": vol, **meta})
+                micro.append({"op": "dispense", "loc": "trash:1", "vol": vol, **meta})
+            else:
+                if tip_mounted:
+                    micro.append({"op": "drop_tip", **tip_meta})
+                    tip_mounted = False
+                micro.append({"op": "pick_up_tip", **meta})
+                micro.append({"op": "aspirate", "loc": nsrc, "vol": vol, **meta})
+                micro.append({"op": "dispense", "loc": "trash:1", "vol": vol, **meta})
+                micro.append({"op": "drop_tip", **meta})
+
+        elif kind == "dilution_series":
+            nsrc = _normalize_loc(str(cfg.get("source", cfg.get("src"))))
             ndil = _normalize_loc(str(cfg["diluent"]))
             first_well = _normalize_loc(str(cfg["first_well"]))
-            n_wells = int(cfg["n"])
+            n_wells = int(cfg.get("n", cfg.get("count", 2)))
             factor = float(cfg.get("factor", 2.0))
             final_vol = float(cfg["final_volume"])
             mix_reps = int(cfg.get("mix_reps", 3))
@@ -330,26 +712,43 @@ def from_stepbot(
             total_first = round(final_vol + transfer_vol, 6)
             wells = [_advance_well_across_row(first_well, k) for k in range(n_wells)]
 
-            micro.append({"op": "pick_up_tip"})
+            if tip_mounted:
+                micro.append({"op": "drop_tip", **tip_meta})
+                tip_mounted = False
+            micro.append({"op": "pick_up_tip", **meta})
             for w in wells[1:]:
-                micro.append({"op": "aspirate", "loc": ndil, "vol": final_vol})
-                micro.append({"op": "dispense", "loc": w, "vol": final_vol})
-            micro.append({"op": "drop_tip"})
+                micro.append({"op": "aspirate", "loc": ndil, "vol": final_vol, **meta})
+                micro.append({"op": "dispense", "loc": w, "vol": final_vol, **meta})
+            micro.append({"op": "drop_tip", **meta})
 
-            micro.append({"op": "pick_up_tip"})
-            micro.append({"op": "aspirate", "loc": nsrc, "vol": total_first})
-            micro.append({"op": "dispense", "loc": wells[0], "vol": total_first})
+            micro.append({"op": "pick_up_tip", **meta})
+            micro.append({"op": "aspirate", "loc": nsrc, "vol": total_first, **meta})
+            micro.append({"op": "dispense", "loc": wells[0], "vol": total_first, **meta})
             for idx in range(n_wells - 1):
-                micro.append({"op": "aspirate", "loc": wells[idx], "vol": transfer_vol})
-                micro.append({"op": "dispense", "loc": wells[idx + 1], "vol": transfer_vol})
+                micro.append({"op": "aspirate", "loc": wells[idx], "vol": transfer_vol, **meta})
+                micro.append({"op": "dispense", "loc": wells[idx + 1], "vol": transfer_vol, **meta})
                 micro.append(
-                    {"op": "mix", "loc": wells[idx + 1], "vol": final_vol, "reps": mix_reps}
+                    {"op": "mix", "loc": wells[idx + 1], "vol": final_vol, "reps": mix_reps, **meta}
                 )
-            micro.append({"op": "aspirate", "loc": wells[-1], "vol": transfer_vol})
-            micro.append({"op": "dispense", "loc": "trash:1", "vol": transfer_vol})
-            micro.append({"op": "drop_tip"})
+            micro.append({"op": "aspirate", "loc": wells[-1], "vol": transfer_vol, **meta})
+            micro.append({"op": "dispense", "loc": "trash:1", "vol": transfer_vol, **meta})
+            micro.append({"op": "drop_tip", **meta})
+
+        idx_s += 1
+
+    if tip_mounted:
+        micro.append({"op": "drop_tip", **tip_meta})
 
     return micro, deck_spec
+
+
+def _expand_8ch_wire_ref(loc: str, wire_format: bool) -> str | list[str]:
+    m_plate = re.match(r"^plate:A(1[0-2]|[1-9])$", loc)
+    if m_plate:
+        col = m_plate.group(1)
+        prefix = "3" if wire_format else "plate"
+        return [f"{prefix}:{r}{col}" for r in "ABCDEFGH"]
+    return _to_wire_well(loc) if wire_format else _to_stepbot_alias_well(loc)
 
 
 def to_stepbot(
@@ -357,76 +756,492 @@ def to_stepbot(
     *,
     name: str = "Exported lab-rehearsal protocol",
     spec: DeckSpec = DEFAULT_DECK_SPEC,
+    wire_format: bool = False,
+    pipette_model: str | None = None,
 ) -> dict[str, Any]:
-    """Export `lab-rehearsal` micro-steps into a declarative `stepbot` protocol mapping."""
-    sb_steps: list[dict[str, Any]] = []
-    i = 0
-    n = len(steps)
-    while i < n:
-        s = steps[i]
-        op = s.get("op")
-        if op == "pick_up_tip":
-            sb_steps.append({"pick_up_tip": {"pipette": "left"}})
-            i += 1
-        elif op == "drop_tip":
-            sb_steps.append({"drop_tip": {"pipette": "left"}})
-            i += 1
-        elif (
-            op == "aspirate"
-            and i + 1 < n
-            and steps[i + 1].get("op") == "dispense"
-            and float(s.get("vol", 0)) == float(steps[i + 1].get("vol", -1))
-        ):
-            dst = str(steps[i + 1]["loc"])
-            if dst in ("trash:1",):
-                sb_steps.append(
-                    {"discard": {"pipette": "left", "source": str(s["loc"]), "volume": float(s["vol"])}}
-                )
-            else:
+    """Export `lab-rehearsal` micro-steps into a declarative `stepbot` protocol mapping.
+
+    When `wire_format=True`, emits the Opentrons API `2.16` `autolab-wire/v1` dialect
+    (`deck["1".."3"]`, `pipettes.right.instrument_name`, `steps[].action`) directly
+    consumable by `stepbot.autolab_wire.compile_stage` and `lab-verify`.
+    """
+    mount = "right" if wire_format else "left"
+    fmt_well = _to_wire_well if wire_format else _to_stepbot_alias_well
+
+    if pipette_model is not None:
+        resolved_model = pipette_model
+    elif spec.pip_max <= 20.0 + VOL_EPS:
+        resolved_model = "p20_single_gen2"
+    elif spec.pip_max > 300.0 + VOL_EPS:
+        resolved_model = "p1000_single_gen2"
+    else:
+        resolved_model = "p300_single_gen2"
+
+    # stepbot single-channel lowering expands 8-channel column targets explicitly
+    if wire_format and "multi" in resolved_model:
+        resolved_model = resolved_model.replace("multi", "single")
+
+    if not wire_format:
+        sb_steps: list[dict[str, Any]] = []
+        i = 0
+        n = len(steps)
+        while i < n:
+            s = steps[i]
+            op = s.get("op")
+            ch = int(s.get("channels", spec.channels))
+            if op == "pick_up_tip":
+                sb_steps.append({"pick_up_tip": {"pipette": mount}})
+                i += 1
+            elif op == "drop_tip":
+                sb_steps.append({"drop_tip": {"pipette": mount}})
+                i += 1
+            elif op == "aspirate":
+                asp_vol = float(s["vol"])
+                src_ref = _expand_8ch_wire_ref(str(s["loc"]), False) if ch == 8 else fmt_well(str(s["loc"]))
+                if (
+                    i + 1 < n
+                    and steps[i + 1].get("op") == "dispense"
+                    and abs(asp_vol - float(steps[i + 1].get("vol", -1))) <= 1e-6
+                ):
+                    dst_raw = str(steps[i + 1]["loc"])
+                    dst_ref = _expand_8ch_wire_ref(dst_raw, False) if ch == 8 else fmt_well(dst_raw)
+                    if dst_raw == "trash:1":
+                        sb_steps.append(
+                            {"discard": {"pipette": mount, "source": src_ref, "volume": asp_vol}}
+                        )
+                    else:
+                        sb_steps.append(
+                            {
+                                "transfer": {
+                                    "pipette": mount,
+                                    "source": src_ref,
+                                    "dest": dst_ref,
+                                    "volume": asp_vol,
+                                    "new_tip": "never",
+                                }
+                            }
+                        )
+                    i += 2
+                    continue
+                # Multi-dispense (`aspirate V` -> `dispense v1..vk`)
+                j = i + 1
+                sub_disps: list[tuple[str, float]] = []
+                disp_sum = 0.0
+                while j < n and steps[j].get("op") == "dispense":
+                    dv = float(steps[j]["vol"])
+                    sub_disps.append((str(steps[j]["loc"]), dv))
+                    disp_sum += dv
+                    j += 1
+                if sub_disps and disp_sum <= asp_vol + 1e-6:
+                    first_dv = sub_disps[0][1]
+                    if len(sub_disps) >= 2 and all(abs(dv - first_dv) <= 1e-6 for _, dv in sub_disps):
+                        sb_steps.append(
+                            {
+                                "distribute": {
+                                    "pipette": mount,
+                                    "source": src_ref,
+                                    "dest": [fmt_well(loc_d) for loc_d, _ in sub_disps],
+                                    "volume": first_dv,
+                                    "new_tip": "never",
+                                    "disposal_volume": _clean_vol(max(0.0, asp_vol - disp_sum)),
+                                }
+                            }
+                        )
+                    else:
+                        for loc_d, dv in sub_disps:
+                            sb_steps.append(
+                                {
+                                    "transfer": {
+                                        "pipette": mount,
+                                        "source": src_ref,
+                                        "dest": fmt_well(loc_d),
+                                        "volume": dv,
+                                        "new_tip": "never",
+                                    }
+                                }
+                            )
+                    i = j
+                    continue
+                # Multi-aspirate (`aspirate v1` + ... + `aspirate vk` -> `dispense V`)
+                j = i
+                asp_srcs: list[tuple[str, float]] = []
+                asp_sum = 0.0
+                while j < n and steps[j].get("op") == "aspirate":
+                    av = float(steps[j]["vol"])
+                    asp_srcs.append((str(steps[j]["loc"]), av))
+                    asp_sum += av
+                    j += 1
+                if j < n and steps[j].get("op") == "dispense" and abs(asp_sum - float(steps[j]["vol"])) <= 1e-6:
+                    dst_raw = str(steps[j]["loc"])
+                    for loc_a, av in asp_srcs:
+                        sb_steps.append(
+                            {
+                                "transfer": {
+                                    "pipette": mount,
+                                    "source": fmt_well(loc_a),
+                                    "dest": fmt_well(dst_raw),
+                                    "volume": av,
+                                    "new_tip": "never",
+                                }
+                            }
+                        )
+                    i = j + 1
+                    continue
+                raise ValueError(f"cannot export step {i + 1} to stepbot: {s!r}")
+            elif op == "mix":
+                w_ref = _expand_8ch_wire_ref(str(s["loc"]), False) if ch == 8 else fmt_well(str(s["loc"]))
                 sb_steps.append(
                     {
-                        "transfer": {
-                            "pipette": "left",
-                            "source": str(s["loc"]),
-                            "dest": dst,
+                        "mix": {
+                            "pipette": mount,
+                            "wells": w_ref,
                             "volume": float(s["vol"]),
+                            "reps": int(s.get("reps", 1)),
                             "new_tip": "never",
                         }
                     }
                 )
-            i += 2
-        elif op == "mix":
-            sb_steps.append(
-                {
-                    "mix": {
-                        "pipette": "left",
-                        "wells": str(s["loc"]),
+                i += 1
+            elif op == "seal":
+                sb_steps.append({"comment": {"text": f"seal {fmt_well(str(s['loc']))}"}})
+                i += 1
+            elif op == "thaw":
+                sb_steps.append({"comment": {"text": f"thaw {fmt_well(str(s['loc']))}"}})
+                i += 1
+            elif op == "incubate":
+                tc = float(s["temp_c"])
+                ds = float(s["duration_s"])
+                sb_steps.append(
+                    {"comment": {"text": f"incubate {fmt_well(str(s['loc']))} at {tc:g}C for {ds:g}s"}}
+                )
+                sb_steps.append({"delay": {"seconds": ds}})
+                i += 1
+            else:
+                raise ValueError(f"cannot export step {i + 1} to stepbot: {s!r}")
+
+        liquids_out: dict[str, Any] = {}
+        for loc, (vol, liq) in sorted(spec.start.items()):
+            sb_well = fmt_well(loc)
+            if liq in liquids_out:
+                prev_w = liquids_out[liq]["wells"]
+                w_list = [prev_w] if isinstance(prev_w, str) else list(prev_w)
+                w_list.append(sb_well)
+                liquids_out[liq]["wells"] = w_list
+            else:
+                liquids_out[liq] = {"wells": sb_well, "volume": float(vol)}
+
+        tip_labware = (
+            "opentrons_96_tiprack_20ul"
+            if "p20" in resolved_model
+            else (
+                "opentrons_96_tiprack_1000ul"
+                if "p1000" in resolved_model
+                else "opentrons_96_tiprack_300ul"
+            )
+        )
+        return {
+            "metadata": {"name": name, "description": "Exported from lab-rehearsal"},
+            "deck": {
+                "plate": {"labware": "corning_96_wellplate_360ul_flat", "slot": 1},
+                "reservoir": {"labware": "nest_12_reservoir_15ml", "slot": 2},
+                "tips": {"labware": tip_labware, "slot": 3},
+            },
+            "pipettes": {mount: {"model": resolved_model, "tip_racks": ["tips"]}},
+            "liquids": liquids_out,
+            "steps": sb_steps,
+        }
+
+    # ---- Opentrons API 2.16 `autolab-wire/v1` compilation ----
+    # Group micro-steps into tip-lifecycle blocks and standalone thermal/seal annotations
+    segments: list[tuple[str, list[dict[str, Any]]]] = []
+    cur_tip_ops: list[dict[str, Any]] | None = None
+    for s in steps:
+        op = s.get("op")
+        if op == "pick_up_tip":
+            cur_tip_ops = []
+        elif op == "drop_tip":
+            if cur_tip_ops is not None:
+                segments.append(("tip_block", cur_tip_ops))
+                cur_tip_ops = None
+        elif op in ("incubate", "seal", "thaw"):
+            if cur_tip_ops is not None and cur_tip_ops:
+                segments.append(("tip_block", cur_tip_ops))
+                cur_tip_ops = None
+            segments.append(("thermal", [dict(s)]))
+        else:
+            if cur_tip_ops is None:
+                cur_tip_ops = []
+            cur_tip_ops.append(dict(s))
+    if cur_tip_ops:
+        segments.append(("tip_block", cur_tip_ops))
+
+    wire_steps: list[dict[str, Any]] = []
+    stepbot_tip_open = False
+
+    for seg_kind, seg_ops in segments:
+        if seg_kind == "thermal":
+            ts = seg_ops[0]
+            top = ts["op"]
+            w_coord = fmt_well(str(ts["loc"]))
+            if top == "seal":
+                wire_steps.append({"action": "comment", "text": f"seal {w_coord}"})
+            elif top == "thaw":
+                wire_steps.append({"action": "comment", "text": f"thaw {w_coord}"})
+            elif top == "incubate":
+                tc = float(ts["temp_c"])
+                ds = float(ts["duration_s"])
+                wire_steps.append(
+                    {"action": "comment", "text": f"incubate {w_coord} at {tc:g}C for {ds:g}s"}
+                )
+                wire_steps.append({"action": "delay", "seconds": ds})
+            continue
+
+        # Lower one `pick_up_tip ... drop_tip` block into stepbot macro actions
+        block_actions: list[dict[str, Any]] = []
+        used_air_dispense = False
+        i = 0
+        m = len(seg_ops)
+        while i < m:
+            s = seg_ops[i]
+            op = s.get("op")
+            ch = int(s.get("channels", spec.channels))
+            if op == "aspirate":
+                asp_vol = float(s["vol"])
+                src_ref = _expand_8ch_wire_ref(str(s["loc"]), True) if ch == 8 else fmt_well(str(s["loc"]))
+                if (
+                    i + 1 < m
+                    and seg_ops[i + 1].get("op") == "dispense"
+                    and abs(asp_vol - float(seg_ops[i + 1].get("vol", -1))) <= 1e-6
+                ):
+                    if seg_ops[i + 1].get("air_dispense"):
+                        used_air_dispense = True
+                    dst_raw = str(seg_ops[i + 1]["loc"])
+                    if dst_raw == "trash:1":
+                        block_actions.append(
+                            {
+                                "action": "discard",
+                                "pipette": mount,
+                                "source": src_ref,
+                                "volume": asp_vol,
+                            }
+                        )
+                    else:
+                        dst_ref = _expand_8ch_wire_ref(dst_raw, True) if ch == 8 else fmt_well(dst_raw)
+                        block_actions.append(
+                            {
+                                "action": "transfer",
+                                "pipette": mount,
+                                "source": src_ref,
+                                "dest": dst_ref,
+                                "volume": asp_vol,
+                            }
+                        )
+                    i += 2
+                    continue
+
+                # Multi-dispense inside tip block
+                j = i + 1
+                sub_disps_w: list[tuple[str, float, bool]] = []
+                disp_sum = 0.0
+                while j < m and seg_ops[j].get("op") == "dispense":
+                    dv = float(seg_ops[j]["vol"])
+                    air_f = bool(seg_ops[j].get("air_dispense", False))
+                    if air_f:
+                        used_air_dispense = True
+                    sub_disps_w.append((str(seg_ops[j]["loc"]), dv, air_f))
+                    disp_sum += dv
+                    j += 1
+                if sub_disps_w and disp_sum <= asp_vol + 1e-6:
+                    first_dv = sub_disps_w[0][1]
+                    if (
+                        len(sub_disps_w) >= 2
+                        and ch == 1
+                        and all(abs(dv - first_dv) <= 1e-6 for _, dv, _ in sub_disps_w)
+                        and all(loc_d != "trash:1" for loc_d, _, _ in sub_disps_w)
+                    ):
+                        block_actions.append(
+                            {
+                                "action": "distribute",
+                                "pipette": mount,
+                                "source": src_ref,
+                                "dest": [fmt_well(loc_d) for loc_d, _, _ in sub_disps_w],
+                                "volume": first_dv,
+                                "disposal_volume": _clean_vol(max(0.0, asp_vol - disp_sum)),
+                            }
+                        )
+                    else:
+                        for loc_d, dv, _ in sub_disps_w:
+                            if loc_d == "trash:1":
+                                block_actions.append(
+                                    {
+                                        "action": "discard",
+                                        "pipette": mount,
+                                        "source": src_ref,
+                                        "volume": dv,
+                                    }
+                                )
+                            else:
+                                dst_ref = _expand_8ch_wire_ref(loc_d, True) if ch == 8 else fmt_well(loc_d)
+                                block_actions.append(
+                                    {
+                                        "action": "transfer",
+                                        "pipette": mount,
+                                        "source": src_ref,
+                                        "dest": dst_ref,
+                                        "volume": dv,
+                                    }
+                                )
+                    i = j
+                    continue
+
+                # Multi-aspirate inside tip block
+                j = i
+                asp_list: list[tuple[str, float]] = []
+                asp_sum = 0.0
+                while j < m and seg_ops[j].get("op") == "aspirate":
+                    av = float(seg_ops[j]["vol"])
+                    asp_list.append((str(seg_ops[j]["loc"]), av))
+                    asp_sum += av
+                    j += 1
+                if j < m and seg_ops[j].get("op") == "dispense" and abs(asp_sum - float(seg_ops[j]["vol"])) <= 1e-6:
+                    dst_raw = str(seg_ops[j]["loc"])
+                    for loc_a, av in asp_list:
+                        if dst_raw == "trash:1":
+                            block_actions.append(
+                                {
+                                    "action": "discard",
+                                    "pipette": mount,
+                                    "source": fmt_well(loc_a),
+                                    "volume": av,
+                                }
+                            )
+                        else:
+                            block_actions.append(
+                                {
+                                    "action": "transfer",
+                                    "pipette": mount,
+                                    "source": fmt_well(loc_a),
+                                    "dest": fmt_well(dst_raw),
+                                    "volume": av,
+                                }
+                            )
+                    i = j + 1
+                    continue
+
+            elif op == "mix":
+                w_ref = _expand_8ch_wire_ref(str(s["loc"]), True) if ch == 8 else fmt_well(str(s["loc"]))
+                block_actions.append(
+                    {
+                        "action": "mix",
+                        "pipette": mount,
+                        "wells": w_ref,
                         "volume": float(s["vol"]),
                         "reps": int(s.get("reps", 1)),
                     }
-                }
-            )
+                )
+                i += 1
+                continue
+
             i += 1
+
+        if not block_actions:
+            continue
+
+        if len(block_actions) == 1 and not stepbot_tip_open and not used_air_dispense:
+            # Canonical single-step tip block (omits redundant default new_tip="once")
+            wire_steps.append(block_actions[0])
+            stepbot_tip_open = False
+        elif len(block_actions) == 1:
+            act = dict(block_actions[0])
+            act["new_tip"] = "once"
+            if used_air_dispense:
+                act["allow_contamination"] = True
+            wire_steps.append(act)
+            stepbot_tip_open = False
         else:
-            raise ValueError(f"cannot export step {i + 1} to stepbot: {s!r}")
+            for a_idx, raw_act in enumerate(block_actions):
+                act = dict(raw_act)
+                if a_idx == 0 and stepbot_tip_open:
+                    # Drop the previous block's open tip cleanly via new_tip="once"
+                    act["new_tip"] = "once"
+                else:
+                    act["new_tip"] = "never"
+                if used_air_dispense:
+                    act["allow_contamination"] = True
+                wire_steps.append(act)
+            stepbot_tip_open = True
 
-    liquids_out: dict[str, Any] = {}
-    for loc, (vol, liq) in sorted(spec.start.items()):
-        res_m = re.match(r"^res:(\d+)$", loc)
-        sb_well = f"reservoir:A{res_m.group(1)}" if res_m else loc
-        liquids_out[liq] = {"wells": sb_well, "volume": float(vol)}
-
-    return {
-        "metadata": {"name": name, "description": "Exported from lab-rehearsal"},
-        "deck": {
-            "plate": {"labware": "corning_96_wellplate_360ul_flat", "slot": 1},
-            "reservoir": {"labware": "nest_12_reservoir_15ml", "slot": 2},
-            "tips": {"labware": "opentrons_96_tiprack_300ul", "slot": 3},
+    tiprack_load_name = (
+        "opentrons_96_tiprack_20ul"
+        if "p20" in resolved_model
+        else (
+            "opentrons_96_tiprack_1000ul"
+            if "p1000" in resolved_model
+            else "opentrons_96_tiprack_300ul"
+        )
+    )
+    wire_doc: dict[str, Any] = {
+        "metadata": {
+            "protocolName": name,
+            "apiLevel": "2.16",
         },
-        "pipettes": {"left": {"model": "p300_single_gen2", "tip_racks": ["tips"]}},
-        "liquids": liquids_out,
-        "steps": sb_steps,
+        "deck": {
+            "1": {"load_name": tiprack_load_name},
+            "2": {"load_name": "nest_12_reservoir_15ml"},
+            "3": {"load_name": "corning_96_wellplate_360ul_flat"},
+        },
+        "pipettes": {
+            mount: {
+                "instrument_name": resolved_model,
+                "tip_racks": ["1"],
+            }
+        },
+        "steps": wire_steps,
     }
+
+    # Declare starting liquid stocks whenever multiple sources or pre-filled wells are used
+    needs_explicit_liquids = len(wire_steps) > 1 or any(
+        st.get("source") not in (None, "2:A1") for st in wire_steps
+    )
+    if needs_explicit_liquids and spec.start:
+        wire_liquids: dict[str, Any] = {}
+        for loc, (vol, liq) in sorted(spec.start.items()):
+            if float(vol) <= VOL_EPS:
+                continue
+            w_coord = fmt_well(loc)
+            if liq in wire_liquids and abs(float(wire_liquids[liq]["volume"]) - float(vol)) <= 1e-6:
+                prev_w = wire_liquids[liq]["wells"]
+                w_list = [prev_w] if isinstance(prev_w, str) else list(prev_w)
+                w_list.append(w_coord)
+                wire_liquids[liq]["wells"] = w_list
+            elif liq in wire_liquids:
+                wire_liquids[f"{liq}_{loc.replace(':', '_')}"] = {
+                    "wells": w_coord,
+                    "volume": float(vol),
+                }
+            else:
+                wire_liquids[liq] = {"wells": w_coord, "volume": float(vol)}
+        if wire_liquids:
+            wire_doc["liquids"] = wire_liquids
+
+    return wire_doc
+
+
+def _quantize_tenths_list(
+    raw_vols: Sequence[float],
+    *,
+    allow_sub_tenth_rounding: bool,
+) -> list[int]:
+    if not allow_sub_tenth_rounding:
+        return [to_tenths_exact(v, "step volume") for v in raw_vols]
+    out: list[int] = []
+    err = 0.0
+    for v in raw_vols:
+        target = float(v) * 10.0 + err
+        q = int(round(target))
+        err = target - q
+        out.append(q)
+    return out
 
 
 def to_lablean(
@@ -434,59 +1249,130 @@ def to_lablean(
     *,
     spec: DeckSpec = DEFAULT_DECK_SPEC,
     pipette_name: str = "P300",
+    allow_sub_tenth_rounding: bool = False,
 ) -> dict[str, Any]:
-    """Convert `lab-rehearsal` steps and deck into a `LabLean` (`YLM/lean`) JSON trace."""
+    """Convert `lab-rehearsal` micro-steps and deck into a `LabLean` (`LabRehearsalLean`) JSON trace.
+
+    By default (`allow_sub_tenth_rounding=False`), rejects sub-`0.1 uL` fractional volumes
+    rather than accumulating per-step quantization drift, and lowers multi-dispense,
+    multi-aspirate, `air_dispense`, `incubate`, `seal`, and `thaw` steps losslessly.
+    """
+    if allow_sub_tenth_rounding:
+        pip_min_t = int(round(spec.pip_min * 10.0))
+        pip_max_t = int(round(spec.pip_max * 10.0))
+    else:
+        pip_min_t = to_tenths_exact(spec.pip_min, "DeckSpec.pip_min")
+        pip_max_t = to_tenths_exact(spec.pip_max, "DeckSpec.pip_max")
+
+    pip_dict = {
+        "name": pipette_name,
+        "min_tenths": pip_min_t,
+        "max_tenths": pip_max_t,
+    }
+
+    tenths_by_idx: dict[int, int] = {}
+    err_by_stream: dict[str, float] = {"aspirate": 0.0, "dispense": 0.0, "mix": 0.0}
+    for idx, st in enumerate(steps):
+        sop = st.get("op")
+        if sop in ("aspirate", "dispense", "mix"):
+            v_f = float(st["vol"])
+            if not allow_sub_tenth_rounding:
+                tenths_by_idx[idx] = to_tenths_exact(v_f, "step volume")
+            else:
+                s_key = str(sop)
+                target = v_f * 10.0 + err_by_stream[s_key]
+                q = int(round(target))
+                err_by_stream[s_key] = target - q
+                tenths_by_idx[idx] = q
+
     ll_steps: list[dict[str, Any]] = []
     i = 0
     n = len(steps)
     while i < n:
         s = steps[i]
         op = s.get("op")
+        if int(s.get("channels", spec.channels)) != 1:
+            raise ValueError(
+                f"step {i + 1} uses channels={s.get('channels', spec.channels)}; "
+                "LabLean single-barrel trace requires channels=1"
+            )
         if op == "pick_up_tip":
             ll_steps.append({"kind": "pickTip"})
             i += 1
         elif op == "drop_tip":
+            if s.get("allow_wet_drop", False):
+                raise ValueError("LabLean dropTip requires empty barrel (allow_wet_drop=False)")
             ll_steps.append({"kind": "dropTip"})
             i += 1
         elif (
             op == "aspirate"
             and i + 1 < n
             and steps[i + 1].get("op") == "dispense"
-            and float(s.get("vol", 0)) == float(steps[i + 1].get("vol", -1))
+            and not bool(steps[i + 1].get("air_dispense", False))
+            and tenths_by_idx[i] == tenths_by_idx[i + 1]
+            and str(s["loc"]) != str(steps[i + 1]["loc"])
+            and int(steps[i + 1].get("channels", spec.channels)) == 1
         ):
-            vol_tenths = int(round(float(s["vol"]) * 10))
             ll_steps.append(
                 {
                     "kind": "transfer",
-                    "pipette": {
-                        "name": pipette_name,
-                        "min_tenths": int(round(spec.pip_min * 10)),
-                        "max_tenths": int(round(spec.pip_max * 10)),
-                    },
+                    "pipette": dict(pip_dict),
                     "src": str(s["loc"]),
                     "dst": str(steps[i + 1]["loc"]),
-                    "vol_tenths": vol_tenths,
+                    "vol_tenths": tenths_by_idx[i],
                 }
             )
             i += 2
+        elif op == "aspirate":
+            ll_steps.append(
+                {
+                    "kind": "aspirate",
+                    "pipette": dict(pip_dict),
+                    "src": str(s["loc"]),
+                    "vol_tenths": tenths_by_idx[i],
+                }
+            )
+            i += 1
+        elif op == "dispense":
+            ll_steps.append(
+                {
+                    "kind": "dispense",
+                    "pipette": dict(pip_dict),
+                    "dst": str(s["loc"]),
+                    "vol_tenths": tenths_by_idx[i],
+                    "airDispense": bool(s.get("air_dispense", False)),
+                }
+            )
+            i += 1
         elif op == "mix":
-            vol_tenths = int(round(float(s["vol"]) * 10))
             ll_steps.append(
                 {
                     "kind": "mix",
-                    "pipette": {
-                        "name": pipette_name,
-                        "min_tenths": int(round(spec.pip_min * 10)),
-                        "max_tenths": int(round(spec.pip_max * 10)),
-                    },
+                    "pipette": dict(pip_dict),
                     "container": str(s["loc"]),
-                    "vol_tenths": vol_tenths,
+                    "vol_tenths": tenths_by_idx[i],
                     "times": int(s.get("reps", 1)),
                 }
             )
             i += 1
+        elif op == "incubate":
+            ll_steps.append(
+                {
+                    "kind": "incubate",
+                    "wellId": str(s["loc"]),
+                    "tempC": int(round(float(s["temp_c"]))),
+                    "durSec": int(round(float(s["duration_s"]))),
+                }
+            )
+            i += 1
+        elif op == "seal":
+            ll_steps.append({"kind": "sealWell", "wellId": str(s["loc"])})
+            i += 1
+        elif op == "thaw":
+            ll_steps.append({"kind": "thawWell", "wellId": str(s["loc"])})
+            i += 1
         else:
-            raise ValueError(f"cannot convert unpaired step {i + 1} to LabLean: {s!r}")
+            raise ValueError(f"cannot convert step {i + 1} to LabLean: {s!r}")
 
     reagents = sorted({liq for _, liq in spec.start.values()})
     return {
@@ -499,7 +1385,7 @@ def to_lablean(
 
 
 def from_lablean(trace_doc: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Lower a `LabLean` step trace (`pickTip`, `dropTip`, `transfer`, `mix`) to `lab-rehearsal`."""
+    """Lower a `LabLean` step trace (`pickTip`, `dropTip`, `transfer`, `aspirate`, `dispense`, `mix`, `incubate`, `sealWell`, `thawWell`) to `lab-rehearsal`."""
     micro: list[dict[str, Any]] = []
     for st in trace_doc.get("steps", []):
         kind = st.get("kind")
@@ -511,16 +1397,48 @@ def from_lablean(trace_doc: Mapping[str, Any]) -> list[dict[str, Any]]:
             vol = float(st["vol_tenths"]) / 10.0
             micro.append({"op": "aspirate", "loc": _normalize_loc(str(st["src"])), "vol": vol})
             micro.append({"op": "dispense", "loc": _normalize_loc(str(st["dst"])), "vol": vol})
+        elif kind == "aspirate":
+            vol = float(st["vol_tenths"]) / 10.0
+            micro.append({"op": "aspirate", "loc": _normalize_loc(str(st["src"])), "vol": vol})
+        elif kind == "dispense":
+            vol = float(st["vol_tenths"]) / 10.0
+            d_step: dict[str, Any] = {
+                "op": "dispense",
+                "loc": _normalize_loc(str(st["dst"])),
+                "vol": vol,
+            }
+            if bool(st.get("airDispense", st.get("air_dispense", False))):
+                d_step["air_dispense"] = True
+            micro.append(d_step)
         elif kind == "mix":
             vol = float(st["vol_tenths"]) / 10.0
+            w_key = st.get("container", st.get("wellId", st.get("loc")))
             micro.append(
                 {
                     "op": "mix",
-                    "loc": _normalize_loc(str(st["container"])),
+                    "loc": _normalize_loc(str(w_key)),
                     "vol": vol,
-                    "reps": max(1, int(st.get("times", 1))),
+                    "reps": max(1, int(st.get("times", st.get("reps", 1)))),
                 }
             )
+        elif kind == "incubate":
+            w_key = st.get("wellId", st.get("container", st.get("loc")))
+            micro.append(
+                {
+                    "op": "incubate",
+                    "loc": _normalize_loc(str(w_key)),
+                    "temp_c": float(st.get("tempC", st.get("temp_c", 37.0))),
+                    "duration_s": float(st.get("durSec", st.get("duration_s", 60.0))),
+                }
+            )
+        elif kind in ("sealWell", "seal"):
+            w_key = st.get("wellId", st.get("container", st.get("loc")))
+            micro.append({"op": "seal", "loc": _normalize_loc(str(w_key))})
+        elif kind in ("thawWell", "thaw"):
+            w_key = st.get("wellId", st.get("container", st.get("loc")))
+            micro.append({"op": "thaw", "loc": _normalize_loc(str(w_key))})
+        else:
+            raise ValueError(f"unsupported LabLean step kind: {kind!r}")
     return micro
 
 

@@ -11,16 +11,17 @@ This module classifies every run into one of four mutually exclusive epistemic s
   - AMBIGUOUS_CHARACTERIZATION
   - CERTIFIED_POSITIVE
   - CERTIFIED_NEGATIVE
-and writes tamper-evident hash-chained SHA-256 receipts strictly for certified results.
+and writes tamper-evident hash-chained SHA-256 receipts strictly for certified results,
+while optionally reconciling post-run attribution outcomes directly into `MemoryStore`.
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+from enum import Enum
 import hashlib
 import json
 import random
-from dataclasses import asdict, dataclass
-from enum import Enum
 from typing import Any
 
 GENESIS_PREV_HASH = "0" * 64
@@ -128,10 +129,11 @@ class RawAppendLedger:
 class CertifiedNegativeLedger:
     """Append-only hash-chained SHA-256 ledger admitting strictly certified results."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, memory_store: Any | None = None) -> None:
         self.receipts: list[LedgerReceipt] = []
         self.retry_queue: list[str] = []
         self.orthogonal_assay_queue: list[str] = []
+        self.memory_store = memory_store
 
     def process_telemetry(
         self,
@@ -140,9 +142,13 @@ class CertifiedNegativeLedger:
         outcome = attribute_post_run_telemetry(telemetry)
         if outcome == AttributionOutcome.EXECUTION_ARTIFACT:
             self.retry_queue.append(telemetry.run_id)
+            if self.memory_store is not None:
+                self.memory_store.reconcile_attribution(telemetry.run_id, outcome.value)
             return outcome, None
         if outcome == AttributionOutcome.AMBIGUOUS_CHARACTERIZATION:
             self.orthogonal_assay_queue.append(telemetry.run_id)
+            if self.memory_store is not None:
+                self.memory_store.reconcile_attribution(telemetry.run_id, outcome.value)
             return outcome, None
 
         tel_hash = _sha256_canonical(asdict(telemetry))
@@ -168,6 +174,12 @@ class CertifiedNegativeLedger:
             receipt_sha256=_sha256_canonical(body),
         )
         self.receipts.append(receipt)
+        if self.memory_store is not None:
+            self.memory_store.reconcile_attribution(
+                telemetry.run_id,
+                outcome.value,
+                receipt_sha256=receipt.receipt_sha256,
+            )
         return outcome, receipt
 
     def verify_chain_integrity(self) -> bool:
