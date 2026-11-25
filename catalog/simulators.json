@@ -1,16 +1,18 @@
 {
-  "schema_version": "1.0.0",
-  "updated_at": "2026-11-23",
+  "schema_version": "1.1.0",
+  "updated_at": "2026-11-25",
   "datasets": [
     {
       "id": "labutopia",
       "name": "LabUtopia",
       "url": "https://github.com/Rui-li023/LabUtopia",
       "paper_url": "https://arxiv.org/abs/2505.22634",
+      "year": 2025,
       "spdx_license": "MIT",
       "license_status": "verified_open",
       "commercial_use_ok": true,
       "redistribution_ok": true,
+      "eval_only": false,
       "notes": "MIT license on repository code; verify third-party scene assets separately."
     },
     {
@@ -18,10 +20,12 @@
       "name": "AutoBio",
       "url": "https://github.com/autobio-bench/AutoBio",
       "paper_url": "https://arxiv.org/abs/2505.14030",
+      "year": 2025,
       "spdx_license": "NOASSERTION",
       "license_status": "no_license_file",
       "commercial_use_ok": false,
       "redistribution_ok": false,
+      "eval_only": true,
       "notes": "Datasets declared MIT, but GitHub repository lacks a top-level LICENSE file; default-deny automated asset fetch."
     },
     {
@@ -29,10 +33,12 @@
       "name": "Chemistry3D",
       "url": "https://github.com/huangyan28/Chemistry3D",
       "paper_url": "https://arxiv.org/abs/2406.08160",
+      "year": 2024,
       "spdx_license": "NOASSERTION",
       "license_status": "no_license_file",
       "commercial_use_ok": false,
       "redistribution_ok": false,
+      "eval_only": true,
       "notes": "No repository LICENSE file; default-deny commercial use and redistribution until upstream license is published."
     },
     {
@@ -40,11 +46,150 @@
       "name": "Labimus",
       "url": "https://labimus.github.io/",
       "paper_url": "https://arxiv.org/abs/2606.31037",
+      "year": 2026,
       "spdx_license": "NOASSERTION",
       "license_status": "check_project_site",
       "commercial_use_ok": false,
       "redistribution_ok": false,
+      "eval_only": true,
       "notes": "Project site hosts benchmark overview without explicit SPDX grant; default-deny automated ingestion."
+    },
+    {
+      "id": "opentrons-shared-protocols",
+      "name": "Opentrons Shared Protocol Fixtures (v6/v7/v8)",
+      "url": "https://github.com/Opentrons/opentrons/tree/edge/shared-data/protocol",
+      "year": 2026,
+      "format": "opentrons_json",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": false,
+      "notes": "Official Apache-2.0 Opentrons JSON v6/v7/v8 liquid-handling and module protocol schemas and fixtures."
+    },
+    {
+      "id": "opentrons-protocols",
+      "name": "Opentrons Protocol Library",
+      "url": "https://github.com/Opentrons/Protocols",
+      "year": 2026,
+      "format": "opentrons_protobuild",
+      "spdx_license": "NOASSERTION",
+      "license_status": "no_license_file",
+      "commercial_use_ok": false,
+      "redistribution_ok": false,
+      "eval_only": false,
+      "notes": "Public OT-2/Flex Python API v2 and protoBuilds JSON repository; core Opentrons SDK is Apache-2.0, while Opentrons/Protocols lacks a top-level LICENSE file so redistribution defaults to deny."
+    },
+    {
+      "id": "finebio",
+      "name": "FineBio",
+      "url": "https://github.com/aistairc/FineBio",
+      "paper_url": "https://arxiv.org/abs/2402.00293",
+      "year": 2025,
+      "format": "finebio_trace",
+      "spdx_license": "LicenseRef-FineBio-NC",
+      "license_status": "non_commercial_agreement",
+      "commercial_use_ok": false,
+      "redistribution_ok": false,
+      "eval_only": false,
+      "notes": "CVPR 2024 / IJCV 2025 fine-grained wet-lab manipulation dataset (32 participants, hierarchical protocol/step/atomic-operation annotations); baseline code is MIT while video/annotations require signed non-commercial research agreement."
+    },
+    {
+      "id": "bioplanner",
+      "name": "BioPlanner (BioProt)",
+      "url": "https://github.com/bioplanner/bioplanner",
+      "paper_url": "https://arxiv.org/abs/2310.10632",
+      "year": 2024,
+      "format": "bioplanner",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": true,
+      "notes": "EMNLP open biological protocol planning benchmark (BioProt JSON corpus mapping wet-lab protocols to structured Pythonic pseudocode); MIT declared in pyproject.toml; benchmark evaluation corpus."
+    },
+    {
+      "id": "bioprobench",
+      "name": "BioProBench",
+      "url": "https://huggingface.co/datasets/BioProBench/BioProBench",
+      "paper_url": "https://arxiv.org/abs/2505.07889",
+      "year": 2026,
+      "format": "bioprobench",
+      "spdx_license": "CC-BY-NC-4.0",
+      "license_status": "verified_non_commercial",
+      "commercial_use_ok": false,
+      "redistribution_ok": true,
+      "eval_only": true,
+      "notes": "ICML 2026 biological protocol understanding and reasoning benchmark (PQA, ORD step ordering, ERR error correction, GEN generation) under CC-BY-NC-4.0; commercial use denied and test splits gated eval_only."
+    },
+    {
+      "id": "lab-bench",
+      "name": "LAB-Bench (ProtocolQA)",
+      "url": "https://huggingface.co/datasets/futurehouse/lab-bench",
+      "paper_url": "https://arxiv.org/abs/2407.10362",
+      "year": 2026,
+      "format": "protocolqa",
+      "spdx_license": "CC-BY-SA-4.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": true,
+      "notes": "FutureHouse wet-lab reasoning benchmark including ProtocolQA troubleshooting scenarios under CC-BY-SA-4.0; contains canary string and is strictly eval_only (never train)."
+    },
+    {
+      "id": "sciknoweval",
+      "name": "SciKnowEval",
+      "url": "https://huggingface.co/datasets/hicai-zju/SciKnowEval",
+      "paper_url": "https://arxiv.org/abs/2406.09098",
+      "year": 2025,
+      "format": "sciknoweval",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": true,
+      "notes": "MIT-licensed multi-level biology and chemistry experimental procedure and wet-lab safety benchmark; gated eval_only to prevent benchmark contamination."
+    },
+    {
+      "id": "embodiedlab",
+      "name": "EmbodiedLab",
+      "url": "https://github.com/HexaFuture/EmbodiedLab",
+      "paper_url": "https://arxiv.org/abs/2610.35385",
+      "year": 2026,
+      "format": "embodiedlab",
+      "spdx_license": "Apache-2.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": true,
+      "notes": "Apache-2.0 physics-based laboratory benchmark (35 quantitative science experiments across 14 apparatus setups testing embodied act-to-know agents); eval_only benchmark."
+    },
+    {
+      "id": "matterix",
+      "name": "MATTERIX",
+      "url": "https://github.com/AccelerationConsortium/Matterix",
+      "paper_url": "https://arxiv.org/abs/2601.13232",
+      "year": 2026,
+      "format": "matterix",
+      "spdx_license": "BSD-3-Clause",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": false,
+      "notes": "Acceleration Consortium BSD-3-Clause multiscale chemistry lab digital twin supporting robotic liquid/powder manipulation, thermal transfer, and reaction kinetics."
+    },
+    {
+      "id": "wetop-bench",
+      "name": "WETOP-Bench",
+      "url": "https://huggingface.co/datasets/InternRobotics/WETOP-Bench-Validation",
+      "year": 2026,
+      "format": "wetop_bench",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true,
+      "eval_only": true,
+      "notes": "InternRobotics MIT-licensed simulated wet-lab vessel manipulation and liquid-pouring validation benchmark; gated eval_only."
     }
   ],
   "repositories": [
@@ -112,6 +257,24 @@
       "redistribution_ok": true
     },
     {
+      "id": "opentrons-protocols-repo",
+      "name": "Opentrons/Protocols",
+      "url": "https://github.com/Opentrons/Protocols",
+      "spdx_license": "NOASSERTION",
+      "license_status": "no_license_file",
+      "commercial_use_ok": false,
+      "redistribution_ok": false
+    },
+    {
+      "id": "lab-bench-repo",
+      "name": "Future-House/LAB-Bench",
+      "url": "https://github.com/Future-House/LAB-Bench",
+      "spdx_license": "CC-BY-SA-4.0",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
       "id": "autobio-repo",
       "name": "autobio-bench/AutoBio",
       "url": "https://github.com/autobio-bench/AutoBio",
@@ -130,10 +293,64 @@
       "redistribution_ok": false
     },
     {
+      "id": "bioprobench-repo",
+      "name": "YuyangSunshine/bioprobench",
+      "url": "https://github.com/YuyangSunshine/bioprobench",
+      "spdx_license": "CC-BY-NC-4.0",
+      "license_status": "verified_non_commercial",
+      "commercial_use_ok": false,
+      "redistribution_ok": true
+    },
+    {
+      "id": "matterix-repo",
+      "name": "AccelerationConsortium/Matterix",
+      "url": "https://github.com/AccelerationConsortium/Matterix",
+      "spdx_license": "BSD-3-Clause",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
       "id": "labutopia-repo",
       "name": "Rui-li023/LabUtopia",
       "url": "https://github.com/Rui-li023/LabUtopia",
       "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "finebio-repo",
+      "name": "aistairc/FineBio",
+      "url": "https://github.com/aistairc/FineBio",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "sciknoweval-repo",
+      "name": "HICAI-ZJU/SciKnowEval",
+      "url": "https://github.com/HICAI-ZJU/SciKnowEval",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "bioplanner-repo",
+      "name": "bioplanner/bioplanner",
+      "url": "https://github.com/bioplanner/bioplanner",
+      "spdx_license": "MIT",
+      "license_status": "verified_open",
+      "commercial_use_ok": true,
+      "redistribution_ok": true
+    },
+    {
+      "id": "embodiedlab-repo",
+      "name": "HexaFuture/EmbodiedLab",
+      "url": "https://github.com/HexaFuture/EmbodiedLab",
+      "spdx_license": "Apache-2.0",
       "license_status": "verified_open",
       "commercial_use_ok": true,
       "redistribution_ok": true

@@ -10,6 +10,7 @@ import tempfile
 from typing import Any, Sequence
 
 from .adapters import from_lablean, from_stepbot, from_twinstep
+from .open_datasets import convert_open_protocol
 from .core import (
     DEFAULT_DECK_SPEC,
     DeckSpec,
@@ -35,6 +36,23 @@ def _load_steps_file(path: Path, fmt: str = "auto") -> tuple[Any, DeckSpec]:
     if fmt == "stepbot" or path.suffix.lower() in (".yaml", ".yml"):
         return from_stepbot(path)
     raw = json.loads(text)
+    if fmt in ("opentrons_json", "bioplanner", "finebio", "bioprobench"):
+        return convert_open_protocol(raw, fmt=fmt)
+    if fmt == "auto" and isinstance(raw, dict) and any(
+        k in raw
+        for k in (
+            "$otSharedSchema",
+            "commands",
+            "database",
+            "annotations",
+            "generated_pseudocode",
+            "edited_pseudocode",
+            "protocol_steps",
+            "correct_steps",
+            "corrected_text",
+        )
+    ):
+        return convert_open_protocol(raw, fmt="auto")
     if fmt == "twinstep" or (
         isinstance(raw, list) and raw and isinstance(raw[0], dict) and "type" in raw[0]
     ):
@@ -160,7 +178,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--format",
-        choices=("auto", "native", "stepbot", "twinstep", "lablean"),
+        choices=(
+            "auto",
+            "native",
+            "stepbot",
+            "twinstep",
+            "lablean",
+            "opentrons_json",
+            "bioplanner",
+            "finebio",
+            "bioprobench",
+        ),
         default="auto",
         help="Input protocol IR format.",
     )
