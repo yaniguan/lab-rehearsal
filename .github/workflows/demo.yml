@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest -v
+      - run: pytest -v -rs
       - name: Verify deterministic demo showcase and output parity
         run: |
           python demo/rehearse.py --demo > /tmp/demo_out.txt
@@ -23,4 +23,28 @@ jobs:
       - name: Validate simulator license catalog and markdown links
         run: python scripts/check_catalog.py
       - name: Ensure repository working tree remains clean
+        run: test -z "$(git status --porcelain)"
+
+  lean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Install elan for Lean 4.36.0
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Fetch and SHA-256 verify 19 official Opentrons fixtures
+        run: python scripts/fetch_opentrons_fixtures.py
+      - name: Build LabRehearsalLean proofs and CLI checker
+        working-directory: lean
+        run: lake build
+      - name: Run real Lean differential parity (>= 47 cases), axiom audit, and 19-fixture check
+        env:
+          REQUIRE_REAL_LEAN: "1"
+        run: pytest -v -s tests/test_phase2_audit_fixes.py tests/test_autolab_wire.py tests/test_open_datasets_2026.py -k "issue_34 or issue_35"
+      - name: Ensure repository working tree remains clean after Lean build
         run: test -z "$(git status --porcelain)"

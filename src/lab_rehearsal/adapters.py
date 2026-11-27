@@ -577,6 +577,7 @@ def from_stepbot(
             vol = float(cfg["volume"])
             new_tip = str(cfg.get("new_tip", "once"))
             mix_after = cfg.get("mix_after")
+            disp_top = str(cfg.get("dispense_position", "bottom")) == "top"
 
             if new_tip == "once":
                 if tip_mounted:
@@ -599,7 +600,10 @@ def from_stepbot(
                 nsrc = _normalize_loc(str(src))
                 ndst = _normalize_loc(str(dst))
                 micro.append({"op": "aspirate", "loc": nsrc, "vol": vol, **meta})
-                micro.append({"op": "dispense", "loc": ndst, "vol": vol, **meta})
+                d_step: dict[str, Any] = {"op": "dispense", "loc": ndst, "vol": vol, **meta}
+                if disp_top:
+                    d_step["air_dispense"] = True
+                micro.append(d_step)
                 if isinstance(mix_after, Mapping):
                     micro.append(
                         {
@@ -621,6 +625,8 @@ def from_stepbot(
             nsrc = _normalize_loc(str(raw_src))
             dsts = [raw_dst] if isinstance(raw_dst, str) else list(raw_dst)  # type: ignore[arg-type]
             vol = float(cfg["volume"])
+            disp_vol = float(cfg.get("disposal_volume", 0.0) or 0.0)
+            disp_top = str(cfg.get("dispense_position", "top")) == "top"
             new_tip = str(cfg.get("new_tip", "once"))
             if new_tip == "once":
                 if tip_mounted:
@@ -632,19 +638,25 @@ def from_stepbot(
                 tip_mounted = True
                 tip_meta = dict(meta)
 
-            total_v = _clean_vol(vol * len(dsts))
+            total_v = _clean_vol(vol * len(dsts) + disp_vol)
             if len(dsts) >= 2 and total_v <= pip_max + VOL_EPS:
                 micro.append({"op": "aspirate", "loc": nsrc, "vol": total_v, **meta})
                 for dst in dsts:
                     ndst = _normalize_loc(str(dst))
-                    micro.append(
-                        {"op": "dispense", "loc": ndst, "vol": vol, "air_dispense": True, **meta}
-                    )
+                    d_dist: dict[str, Any] = {"op": "dispense", "loc": ndst, "vol": vol, **meta}
+                    if disp_top:
+                        d_dist["air_dispense"] = True
+                    micro.append(d_dist)
+                if disp_vol > VOL_EPS:
+                    micro.append({"op": "dispense", "loc": "trash:1", "vol": disp_vol, **meta})
             else:
                 for dst in dsts:
                     ndst = _normalize_loc(str(dst))
                     micro.append({"op": "aspirate", "loc": nsrc, "vol": vol, **meta})
-                    micro.append({"op": "dispense", "loc": ndst, "vol": vol, **meta})
+                    d_dist2: dict[str, Any] = {"op": "dispense", "loc": ndst, "vol": vol, **meta}
+                    if disp_top:
+                        d_dist2["air_dispense"] = True
+                    micro.append(d_dist2)
 
             if new_tip == "once":
                 micro.append({"op": "drop_tip", **meta})
@@ -751,6 +763,97 @@ def _expand_8ch_wire_ref(loc: str, wire_format: bool) -> str | list[str]:
     return _to_wire_well(loc) if wire_format else _to_stepbot_alias_well(loc)
 
 
+def _has_heterogeneous_plate_columns(spec: DeckSpec) -> bool:
+    """Return True iff any 96-well plate column has non-uniform initial volume or liquid species."""
+    for col in range(1, 13):
+        entries = [spec.start.get(f"plate:{r}{col}", (0.0, "")) for r in "ABCDEFGH"]
+        first_v, first_l = entries[0]
+        for v, l in entries[1:]:
+            if abs(float(v) - float(first_v)) > 1e-6 or str(l) != str(first_l):
+                return True
+    return False
+
+
+def _coalesce_wire_block_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Coalesce sequential transfer+mix and homogeneous-volume transfers inside a tip block."""
+    if len(actions) <= 1:
+        return list(actions)
+
+    # Pass 1: fold immediate `mix` on single destination well into preceding `transfer.mix_after`
+    pass1: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(actions):
+        cur = dict(actions[idx])
+        if (
+            cur.get("action") == "transfer"
+            and "mix_after" not in cur
+            and idx + 1 < len(actions)
+            and actions[idx + 1].get("action") == "mix"
+            and actions[idx + 1].get("pipette") == cur.get("pipette")
+            and actions[idx + 1].get("wells") == cur.get("dest")
+        ):
+            nxt = actions[idx + 1]
+            cur["mix_after"] = {
+                "reps": int(nxt["reps"]),
+                "volume": float(nxt["volume"]),
+            }
+            pass1.append(cur)
+            idx += 2
+            continue
+        pass1.append(cur)
+        idx += 1
+
+    if len(pass1) <= 1:
+        return pass1
+
+    # Pass 2: fold consecutive `transfer` steps with identical pipette, volume & dispense_position
+    pass2: list[dict[str, Any]] = []
+    for act in pass1:
+        if (
+            pass2
+            and pass2[-1].get("action") == "transfer"
+            and act.get("action") == "transfer"
+            and "mix_after" not in pass2[-1]
+            and "mix_after" not in act
+            and pass2[-1].get("pipette") == act.get("pipette")
+            and abs(float(pass2[-1]["volume"]) - float(act["volume"])) <= 1e-6
+            and pass2[-1].get("dispense_position", "bottom") == act.get("dispense_position", "bottom")
+        ):
+            prev = pass2[-1]
+            p_src = prev["source"]
+            p_dst = prev["dest"]
+            a_src = act["source"]
+            a_dst = act["dest"]
+            p_srcs = [p_src] if isinstance(p_src, str) else list(p_src)
+            p_dsts = [p_dst] if isinstance(p_dst, str) else list(p_dst)
+            a_srcs = [a_src] if isinstance(a_src, str) else list(a_src)
+            a_dsts = [a_dst] if isinstance(a_dst, str) else list(a_dst)
+            if len(p_srcs) == 1 and len(p_dsts) > 1:
+                p_srcs = p_srcs * len(p_dsts)
+            elif len(p_dsts) == 1 and len(p_srcs) > 1:
+                p_dsts = p_dsts * len(p_srcs)
+            if len(a_srcs) == 1 and len(a_dsts) > 1:
+                a_srcs = a_srcs * len(a_dsts)
+            elif len(a_dsts) == 1 and len(a_srcs) > 1:
+                a_dsts = a_dsts * len(a_srcs)
+            if len(p_srcs) == len(p_dsts) and len(a_srcs) == len(a_dsts):
+                merged_srcs = p_srcs + a_srcs
+                merged_dsts = p_dsts + a_dsts
+                prev["source"] = merged_srcs[0] if len(set(merged_srcs)) == 1 else merged_srcs
+                prev["dest"] = merged_dsts[0] if len(merged_dsts) == 1 else merged_dsts
+                continue
+        pass2.append(dict(act))
+
+    return pass2
+
+
+def _well_for_row(loc: str, row_ch: str, fmt_well_fn: Any) -> str:
+    m_plate = re.match(r"^plate:A(1[0-2]|[1-9])$", loc)
+    if m_plate:
+        return f"3:{row_ch}{m_plate.group(1)}"
+    return fmt_well_fn(loc)
+
+
 def to_stepbot(
     steps: Sequence[Mapping[str, Any]],
     *,
@@ -768,17 +871,35 @@ def to_stepbot(
     mount = "right" if wire_format else "left"
     fmt_well = _to_wire_well if wire_format else _to_stepbot_alias_well
 
+    pip_ops = [
+        s
+        for s in steps
+        if isinstance(s, Mapping)
+        and s.get("op") in ("pick_up_tip", "drop_tip", "aspirate", "dispense", "mix")
+    ]
+    has_8ch = any(int(s.get("channels", spec.channels)) == 8 for s in pip_ops)
+    has_1ch = any(int(s.get("channels", spec.channels)) == 1 for s in pip_ops)
+
     if pipette_model is not None:
         resolved_model = pipette_model
     elif spec.pip_max <= 20.0 + VOL_EPS:
-        resolved_model = "p20_single_gen2"
+        resolved_model = "p20_multi_gen2" if (has_8ch and not has_1ch) else "p20_single_gen2"
     elif spec.pip_max > 300.0 + VOL_EPS:
         resolved_model = "p1000_single_gen2"
     else:
-        resolved_model = "p300_single_gen2"
+        resolved_model = "p300_multi_gen2" if (has_8ch and not has_1ch) else "p300_single_gen2"
 
-    # stepbot single-channel lowering expands 8-channel column targets explicitly
-    if wire_format and "multi" in resolved_model:
+    # Keep native 8-channel pipette when all steps are 8-channel and columns are homogeneous;
+    # otherwise lower heterogeneous 8-channel columns onto per-row single-channel steps with
+    # fresh tips (`new_tip="always"` / per-row `"once"`) so distinct rows never share one tip.
+    use_native_8ch = bool(
+        wire_format
+        and "multi" in resolved_model
+        and has_8ch
+        and not has_1ch
+        and not _has_heterogeneous_plate_columns(spec)
+    )
+    if wire_format and "multi" in resolved_model and not use_native_8ch:
         resolved_model = resolved_model.replace("multi", "single")
 
     if not wire_format:
@@ -978,7 +1099,178 @@ def to_stepbot(
     wire_steps: list[dict[str, Any]] = []
     stepbot_tip_open = False
 
-    for seg_kind, seg_ops in segments:
+    def _lower_block_ops(
+        ops_slice: Sequence[Mapping[str, Any]],
+        *,
+        row_override: str | None = None,
+    ) -> list[dict[str, Any]]:
+        actions_out: list[dict[str, Any]] = []
+        idx_op = 0
+        m_ops = len(ops_slice)
+        while idx_op < m_ops:
+            st = ops_slice[idx_op]
+            op_name = st.get("op")
+            ch_val = int(st.get("channels", spec.channels))
+
+            def _ref(raw_l: str) -> str | list[str]:
+                if row_override is not None:
+                    return _well_for_row(raw_l, row_override, fmt_well)
+                if ch_val == 8 and not use_native_8ch:
+                    return _expand_8ch_wire_ref(raw_l, True)
+                return fmt_well(raw_l)
+
+            if op_name == "aspirate":
+                asp_vol = float(st["vol"])
+                src_ref = _ref(str(st["loc"]))
+                if (
+                    idx_op + 1 < m_ops
+                    and ops_slice[idx_op + 1].get("op") == "dispense"
+                    and abs(asp_vol - float(ops_slice[idx_op + 1].get("vol", -1))) <= 1e-6
+                ):
+                    air_flag = bool(ops_slice[idx_op + 1].get("air_dispense", False))
+                    dst_raw = str(ops_slice[idx_op + 1]["loc"])
+                    if dst_raw == "trash:1":
+                        actions_out.append(
+                            {
+                                "action": "discard",
+                                "pipette": mount,
+                                "source": src_ref,
+                                "volume": asp_vol,
+                            }
+                        )
+                    else:
+                        dst_ref = _ref(dst_raw)
+                        t_act: dict[str, Any] = {
+                            "action": "transfer",
+                            "pipette": mount,
+                            "source": src_ref,
+                            "dest": dst_ref,
+                            "volume": asp_vol,
+                        }
+                        if air_flag:
+                            t_act["dispense_position"] = "top"
+                        actions_out.append(t_act)
+                    idx_op += 2
+                    continue
+
+                # Multi-dispense inside tip block
+                j_op = idx_op + 1
+                sub_disps_w: list[tuple[str, float, bool]] = []
+                disp_sum = 0.0
+                while j_op < m_ops and ops_slice[j_op].get("op") == "dispense":
+                    dv = float(ops_slice[j_op]["vol"])
+                    air_f = bool(ops_slice[j_op].get("air_dispense", False))
+                    sub_disps_w.append((str(ops_slice[j_op]["loc"]), dv, air_f))
+                    disp_sum += dv
+                    j_op += 1
+                if sub_disps_w and disp_sum <= asp_vol + 1e-6:
+                    first_dv = sub_disps_w[0][1]
+                    all_air = all(air_f for _, _, air_f in sub_disps_w)
+                    any_air = any(air_f for _, _, air_f in sub_disps_w)
+                    if (
+                        len(sub_disps_w) >= 2
+                        and (ch_val == 1 or use_native_8ch or row_override is not None)
+                        and all(abs(dv - first_dv) <= 1e-6 for _, dv, _ in sub_disps_w)
+                        and all(loc_d != "trash:1" for loc_d, _, _ in sub_disps_w)
+                        and (all_air == any_air)
+                    ):
+                        dist_act: dict[str, Any] = {
+                            "action": "distribute",
+                            "pipette": mount,
+                            "source": src_ref,
+                            "dest": [_ref(loc_d) for loc_d, _, _ in sub_disps_w],
+                            "volume": first_dv,
+                            "disposal_volume": _clean_vol(max(0.0, asp_vol - disp_sum)),
+                        }
+                        if all_air:
+                            dist_act["dispense_position"] = "top"
+                        else:
+                            dist_act["dispense_position"] = "bottom"
+                        actions_out.append(dist_act)
+                    else:
+                        for loc_d, dv, air_f in sub_disps_w:
+                            if loc_d == "trash:1":
+                                actions_out.append(
+                                    {
+                                        "action": "discard",
+                                        "pipette": mount,
+                                        "source": src_ref,
+                                        "volume": dv,
+                                    }
+                                )
+                            else:
+                                dst_ref = _ref(loc_d)
+                                t_sub: dict[str, Any] = {
+                                    "action": "transfer",
+                                    "pipette": mount,
+                                    "source": src_ref,
+                                    "dest": dst_ref,
+                                    "volume": dv,
+                                }
+                                if air_f:
+                                    t_sub["dispense_position"] = "top"
+                                actions_out.append(t_sub)
+                    idx_op = j_op
+                    continue
+
+                # Multi-aspirate inside tip block
+                j_op = idx_op
+                asp_list: list[tuple[str, float]] = []
+                asp_sum = 0.0
+                while j_op < m_ops and ops_slice[j_op].get("op") == "aspirate":
+                    av = float(ops_slice[j_op]["vol"])
+                    asp_list.append((str(ops_slice[j_op]["loc"]), av))
+                    asp_sum += av
+                    j_op += 1
+                if (
+                    j_op < m_ops
+                    and ops_slice[j_op].get("op") == "dispense"
+                    and abs(asp_sum - float(ops_slice[j_op]["vol"])) <= 1e-6
+                ):
+                    dst_raw = str(ops_slice[j_op]["loc"])
+                    air_f = bool(ops_slice[j_op].get("air_dispense", False))
+                    for loc_a, av in asp_list:
+                        if dst_raw == "trash:1":
+                            actions_out.append(
+                                {
+                                    "action": "discard",
+                                    "pipette": mount,
+                                    "source": _ref(loc_a),
+                                    "volume": av,
+                                }
+                            )
+                        else:
+                            t_ma: dict[str, Any] = {
+                                "action": "transfer",
+                                "pipette": mount,
+                                "source": _ref(loc_a),
+                                "dest": _ref(dst_raw),
+                                "volume": av,
+                            }
+                            if air_f:
+                                t_ma["dispense_position"] = "top"
+                            actions_out.append(t_ma)
+                    idx_op = j_op + 1
+                    continue
+
+            elif op_name == "mix":
+                w_ref = _ref(str(st["loc"]))
+                actions_out.append(
+                    {
+                        "action": "mix",
+                        "pipette": mount,
+                        "wells": w_ref,
+                        "volume": float(st["vol"]),
+                        "reps": int(st.get("reps", 1)),
+                    }
+                )
+                idx_op += 1
+                continue
+
+            idx_op += 1
+        return actions_out
+
+    for seg_idx, (seg_kind, seg_ops) in enumerate(segments):
         if seg_kind == "thermal":
             ts = seg_ops[0]
             top = ts["op"]
@@ -996,178 +1288,67 @@ def to_stepbot(
                 wire_steps.append({"action": "delay", "seconds": ds})
             continue
 
-        # Lower one `pick_up_tip ... drop_tip` block into stepbot macro actions
-        block_actions: list[dict[str, Any]] = []
-        used_air_dispense = False
-        i = 0
-        m = len(seg_ops)
-        while i < m:
-            s = seg_ops[i]
-            op = s.get("op")
-            ch = int(s.get("channels", spec.channels))
-            if op == "aspirate":
-                asp_vol = float(s["vol"])
-                src_ref = _expand_8ch_wire_ref(str(s["loc"]), True) if ch == 8 else fmt_well(str(s["loc"]))
-                if (
-                    i + 1 < m
-                    and seg_ops[i + 1].get("op") == "dispense"
-                    and abs(asp_vol - float(seg_ops[i + 1].get("vol", -1))) <= 1e-6
-                ):
-                    if seg_ops[i + 1].get("air_dispense"):
-                        used_air_dispense = True
-                    dst_raw = str(seg_ops[i + 1]["loc"])
-                    if dst_raw == "trash:1":
-                        block_actions.append(
-                            {
-                                "action": "discard",
-                                "pipette": mount,
-                                "source": src_ref,
-                                "volume": asp_vol,
-                            }
-                        )
-                    else:
-                        dst_ref = _expand_8ch_wire_ref(dst_raw, True) if ch == 8 else fmt_well(dst_raw)
-                        block_actions.append(
-                            {
-                                "action": "transfer",
-                                "pipette": mount,
-                                "source": src_ref,
-                                "dest": dst_ref,
-                                "volume": asp_vol,
-                            }
-                        )
-                    i += 2
-                    continue
+        seg_is_8ch_lowered = (
+            not use_native_8ch
+            and any(int(s.get("channels", spec.channels)) == 8 for s in seg_ops)
+        )
+        has_later_tip_block = any(k == "tip_block" for k, _ in segments[seg_idx + 1 :])
 
-                # Multi-dispense inside tip block
-                j = i + 1
-                sub_disps_w: list[tuple[str, float, bool]] = []
-                disp_sum = 0.0
-                while j < m and seg_ops[j].get("op") == "dispense":
-                    dv = float(seg_ops[j]["vol"])
-                    air_f = bool(seg_ops[j].get("air_dispense", False))
-                    if air_f:
-                        used_air_dispense = True
-                    sub_disps_w.append((str(seg_ops[j]["loc"]), dv, air_f))
-                    disp_sum += dv
-                    j += 1
-                if sub_disps_w and disp_sum <= asp_vol + 1e-6:
-                    first_dv = sub_disps_w[0][1]
-                    if (
-                        len(sub_disps_w) >= 2
-                        and ch == 1
-                        and all(abs(dv - first_dv) <= 1e-6 for _, dv, _ in sub_disps_w)
-                        and all(loc_d != "trash:1" for loc_d, _, _ in sub_disps_w)
-                    ):
-                        block_actions.append(
-                            {
-                                "action": "distribute",
-                                "pipette": mount,
-                                "source": src_ref,
-                                "dest": [fmt_well(loc_d) for loc_d, _, _ in sub_disps_w],
-                                "volume": first_dv,
-                                "disposal_volume": _clean_vol(max(0.0, asp_vol - disp_sum)),
-                            }
-                        )
-                    else:
-                        for loc_d, dv, _ in sub_disps_w:
-                            if loc_d == "trash:1":
-                                block_actions.append(
-                                    {
-                                        "action": "discard",
-                                        "pipette": mount,
-                                        "source": src_ref,
-                                        "volume": dv,
-                                    }
-                                )
-                            else:
-                                dst_ref = _expand_8ch_wire_ref(loc_d, True) if ch == 8 else fmt_well(loc_d)
-                                block_actions.append(
-                                    {
-                                        "action": "transfer",
-                                        "pipette": mount,
-                                        "source": src_ref,
-                                        "dest": dst_ref,
-                                        "volume": dv,
-                                    }
-                                )
-                    i = j
-                    continue
-
-                # Multi-aspirate inside tip block
-                j = i
-                asp_list: list[tuple[str, float]] = []
-                asp_sum = 0.0
-                while j < m and seg_ops[j].get("op") == "aspirate":
-                    av = float(seg_ops[j]["vol"])
-                    asp_list.append((str(seg_ops[j]["loc"]), av))
-                    asp_sum += av
-                    j += 1
-                if j < m and seg_ops[j].get("op") == "dispense" and abs(asp_sum - float(seg_ops[j]["vol"])) <= 1e-6:
-                    dst_raw = str(seg_ops[j]["loc"])
-                    for loc_a, av in asp_list:
-                        if dst_raw == "trash:1":
-                            block_actions.append(
-                                {
-                                    "action": "discard",
-                                    "pipette": mount,
-                                    "source": fmt_well(loc_a),
-                                    "volume": av,
-                                }
-                            )
-                        else:
-                            block_actions.append(
-                                {
-                                    "action": "transfer",
-                                    "pipette": mount,
-                                    "source": fmt_well(loc_a),
-                                    "dest": fmt_well(dst_raw),
-                                    "volume": av,
-                                }
-                            )
-                    i = j + 1
-                    continue
-
-            elif op == "mix":
-                w_ref = _expand_8ch_wire_ref(str(s["loc"]), True) if ch == 8 else fmt_well(str(s["loc"]))
-                block_actions.append(
-                    {
-                        "action": "mix",
-                        "pipette": mount,
-                        "wells": w_ref,
-                        "volume": float(s["vol"]),
-                        "reps": int(s.get("reps", 1)),
-                    }
-                )
-                i += 1
+        if seg_is_8ch_lowered:
+            expanded_actions = _coalesce_wire_block_actions(_lower_block_ops(seg_ops))
+            if not expanded_actions:
                 continue
+            if len(expanded_actions) == 1 and expanded_actions[0].get("action") in ("transfer", "mix", "discard"):
+                act_8 = dict(expanded_actions[0])
+                act_8["new_tip"] = "always"
+                wire_steps.append(act_8)
+                stepbot_tip_open = False
+            else:
+                for row_ch in "ABCDEFGH":
+                    row_acts = _coalesce_wire_block_actions(
+                        _lower_block_ops(seg_ops, row_override=row_ch)
+                    )
+                    if len(row_acts) == 1:
+                        r_act = dict(row_acts[0])
+                        r_act["new_tip"] = "once"
+                        wire_steps.append(r_act)
+                        stepbot_tip_open = False
+                    else:
+                        for r_idx, raw_ra in enumerate(row_acts):
+                            r_act = dict(raw_ra)
+                            r_act["new_tip"] = "once" if (r_idx == 0 and stepbot_tip_open) else "never"
+                            wire_steps.append(r_act)
+                        stepbot_tip_open = True
+            continue
 
-            i += 1
-
+        block_actions = _lower_block_ops(seg_ops)
         if not block_actions:
             continue
 
-        if len(block_actions) == 1 and not stepbot_tip_open and not used_air_dispense:
-            # Canonical single-step tip block (omits redundant default new_tip="once")
-            wire_steps.append(block_actions[0])
-            stepbot_tip_open = False
-        elif len(block_actions) == 1:
+        if has_later_tip_block and len(block_actions) > 1:
+            block_actions = _coalesce_wire_block_actions(block_actions)
+
+        if len(block_actions) == 1:
             act = dict(block_actions[0])
-            act["new_tip"] = "once"
-            if used_air_dispense:
-                act["allow_contamination"] = True
+            is_minimal_single = (
+                not stepbot_tip_open
+                and act.get("action") == "transfer"
+                and "dispense_position" not in act
+                and "mix_after" not in act
+                and not isinstance(act.get("dest"), list)
+                and not isinstance(act.get("source"), list)
+            )
+            if not is_minimal_single:
+                act["new_tip"] = "once"
             wire_steps.append(act)
             stepbot_tip_open = False
         else:
             for a_idx, raw_act in enumerate(block_actions):
                 act = dict(raw_act)
                 if a_idx == 0 and stepbot_tip_open:
-                    # Drop the previous block's open tip cleanly via new_tip="once"
                     act["new_tip"] = "once"
                 else:
                     act["new_tip"] = "never"
-                if used_air_dispense:
-                    act["allow_contamination"] = True
                 wire_steps.append(act)
             stepbot_tip_open = True
 
@@ -1199,9 +1380,11 @@ def to_stepbot(
         "steps": wire_steps,
     }
 
-    # Declare starting liquid stocks whenever multiple sources or pre-filled wells are used
-    needs_explicit_liquids = len(wire_steps) > 1 or any(
-        st.get("source") not in (None, "2:A1") for st in wire_steps
+    # Declare starting liquid stocks whenever multiple sources, non-default stocks, or pre-filled wells are used
+    needs_explicit_liquids = (
+        len(wire_steps) > 1
+        or dict(spec.start) != dict(DEFAULT_DECK_SPEC.start)
+        or any(st.get("source") not in (None, "2:A1") for st in wire_steps)
     )
     if needs_explicit_liquids and spec.start:
         wire_liquids: dict[str, Any] = {}

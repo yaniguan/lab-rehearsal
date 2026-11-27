@@ -1,6 +1,10 @@
 name = "lab-rehearsal-lean"
 version = "0.1.0"
-defaultTargets = ["LabRehearsalLean"]
+defaultTargets = ["LabRehearsalLean", "lab-rehearsal-check"]
 
 [[lean_lib]]
 name = "LabRehearsalLean"
+
+[[lean_exe]]
+name = "lab-rehearsal-check"
+root = "Main"

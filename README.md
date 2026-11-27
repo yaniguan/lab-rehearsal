@@ -24,7 +24,7 @@ Full architectural documentation, state-machine invariants, commit history, and 
 `autolab_wire.py` (`REPO_ID = "lab-rehearsal"`, `LAYER = "L4"`) connects `lab-rehearsal` into the deterministic 15-repository [Auto-Lab](https://github.com/yaniguan/auto-lab) packet pipeline (`lab-ears -> lab-ask-why -> lab-decide -> lab-automation-atlas -> buy-or-make -> labshift -> lab-rehearsal -> lab-verify -> stepbot -> lab-hands -> lab-feet -> lab-attrib -> twinstep -> labfill -> labbench-posttrain`):
 
 - **Upstream (`L5`)**: Consumes scheduled assay packets from [`labshift`](https://github.com/yaniguan/labshift) together with `parsed_spans.volume_ul` (and optional `rehearsal_steps`).
-- **Pre-Execution Twin Gate (`L4`)**: `process_packet(packet, *, memory_path=None)` deep-copies the `autolab-wire/v1` packet, bypasses already-halted packets unchanged, executes `RehearsalSession` (defaulting to an isolated temporary directory without touching tracked `demo/memory/runs.jsonl`, or persisting across multi-packet campaigns when `memory_path` / `rehearsal_memory_path` is provided), models 1- and 8-channel pipettes plus open-well volatile evaporation (`incubate`, `seal`, `thaw`), halts on any safety violation (`no_tip_reuse`, `no_overfill`, `enough_liquid`, `volume_in_range`, `tip_present`, `thawed_before_pipetting`, `unsealed_before_pipetting`, `high_temp_requires_seal`, `all_tips_dropped`) with `halt_reason = "L4_REHEARSAL_BLOCK"` and `protocol_yaml_dict = None`, and records Lean invariant `checkRehearsal_preserves_capacity` in `bottom_reasoning_traces`.
+- **Pre-Execution Twin Gate (`L4`)**: `process_packet(packet, *, memory_path=None, run_lean_check=None)` deep-copies the `autolab-wire/v1` packet, bypasses already-halted packets unchanged, rejects non-finite/non-positive/non-numeric `volume_ul` (`invalid_requested_volume`) and unrehearsable single-well volumes (`requested_volume_not_rehearsable`) without silent capping, executes `RehearsalSession` (defaulting to an isolated temporary directory without touching tracked `demo/memory/runs.jsonl`, or persisting across multi-packet campaigns when `memory_path` / `rehearsal_memory_path` is provided), models 1- and 8-channel pipettes plus open-well volatile evaporation (`incubate`, `seal`, `thaw`), re-rehearses compiled `protocol_yaml_dict` via `from_stepbot` (`compiled_protocol_mismatch` gate), halts on any safety violation (`no_tip_reuse`, `no_overfill`, `unknown_start_volume`, `enough_liquid`, `volume_in_range`, `tip_present`, `thawed_before_pipetting`, `unsealed_before_pipetting`, `high_temp_requires_seal`, `all_tips_dropped`) with `halt_reason = "L4_REHEARSAL_BLOCK"` and `protocol_yaml_dict = None`, and records `invariant = "lean_model_compatible"` in `bottom_reasoning_traces` (upgraded to `"checkRehearsal_preserves_capacity"` only when `run_lean_check=True` verifies the packet with the compiled Lean 4.36.0 `lab-rehearsal-check` binary).
 - **Downstream (`L4` / `L1` / `L3`)**: Compiles approved multi-step trajectories (`transfer`, `distribute`, `mix`, `discard`, and `incubate`/`seal`/`thaw` delays/annotations) directly into `rehearsal.protocol_yaml_dict` (Opentrons Python API `2.16` specification) for [`lab-verify`](https://github.com/yaniguan/lab-verify) (`lean-mcp/v1` envelope minting) and [`stepbot`](https://github.com/yaniguan/stepbot) compilation, and feeds rehearsed step semantics downstream to [`twinstep`](https://github.com/yaniguan/twinstep) (`L3` causal ordering DAGs and seeded error twins).
 - **Post-Run `L4` Partner**: Pairs with [`lab-attrib`](https://github.com/yaniguan/lab-attrib) (`L4` post-execution 4-way causal blame, NNLS precursor deconvolution, and SHA-256 certified ledger) so transient `EXECUTION_ARTIFACT` hardware faults permit bounded clean retries while permanent safety violations are fast-denied and sub-linear structural skeleton/shingle recall flags isomorphic prior failures across `runs.jsonl`.
 
@@ -33,7 +33,7 @@ Full architectural documentation, state-machine invariants, commit history, and 
 ```text
 lab-rehearsal/
 ├── .github/workflows/
-│   └── demo.yml                          # CI matrix (Python 3.10-3.12): pytest, output parity, catalog check
+│   └── demo.yml                          # CI (Python 3.10-3.12 + Lean 4.36.0): pytest, Lean parity, demo diff, catalog
 ├── catalog/
 │   └── simulators.json                   # SPDX & license-governance manifest for datasets and simulators
 ├── community_extensions/
@@ -54,13 +54,16 @@ lab-rehearsal/
 ├── docs/
 │   └── ARCHITECTURE_AND_HISTORY.md       # Deep technical profile (Object, Data, Model, History)
 ├── lean/
-│   └── LabRehearsalLean.lean             # Lean 4.36.0 capacity, conservation, rusty-SOP & attribution proofs
+│   ├── LabRehearsalLean.lean             # Lean 4.36.0 capacity, conservation, rusty-SOP & attribution proofs
+│   ├── Main.lean                         # Compiled CLI runner (`lab-rehearsal-check`) for `checkRehearsal`
+│   └── lakefile.toml                     # Lake package manifest building library & CLI checker
 ├── schema/
 │   ├── protocol.schema.json              # Strict JSON Schema for micro-step protocols
 │   └── run_record.schema.json            # Strict JSON Schema for episodic runs.jsonl records
 ├── scripts/
 │   ├── check_catalog.py                  # Automated SPDX license, eval_only & markdown URL validator
-│   └── fetch_open_protocols.py           # Offline/online open-protocol converter & rehearsal runner
+│   ├── fetch_open_protocols.py           # Offline/online open-protocol converter & rehearsal runner
+│   └── fetch_opentrons_fixtures.py       # Pinned SHA-256 fetcher & evaluator for 19 Opentrons fixtures
 ├── src/lab_rehearsal/
 │   ├── __init__.py                       # Public package API
 │   ├── adapters.py                       # Bidirectional stepbot / twinstep / LabLean IR converters
@@ -191,7 +194,7 @@ Only the good protocol reaches the mock executor; each broken one is stopped by 
 
 `lab_rehearsal.open_datasets` and `scripts/fetch_open_protocols.py` enforce `catalog/simulators.json` SPDX, `commercial_use_ok`, `redistribution_ok`, and `eval_only` benchmark contamination guards before converting external open-source protocol representations into `lab-rehearsal` twin step lists (`schema/protocol.schema.json`) for 96-well dry-run verification:
 
-- **Opentrons JSON (`v6`/`v7`/`v8`) & `protoBuilds`** (`from_opentrons_json`): Lowers `loadPipette`, `loadLabware`, `loadLiquid`, `pickUpTip`, `aspirate`, `dispense`, `blowout`, `thermocycler/closeLid`, `waitForDuration`, and `dropTip` commands onto calibrated 1- and 8-channel deck configurations.
+- **Opentrons JSON (`v6`/`v7`/`v8`) & `protoBuilds`** (`from_opentrons_json`): Lowers `loadPipette`, `loadLabware`, `loadLiquid`, `pickUpTip`, `aspirate`, `dispense`, `blowout`, `thermocycler/closeLid`, `waitForDuration`, and `dropTip` commands onto distinct per-`labwareId` container and tip-rack namespaces (`plate`, `plate_2..`, `tiprack`, `tiprack_2..`, `res`, `res_2..`) with true `labwareDefinitions` geometry capacities and default-deny `unknown_start_volume` when `loadLiquid` is omitted (never inventing starting stock).
 - **BioPlanner (`BioProt`) & WLP Structured Steps** (`from_bioplanner`): Statically parses EMNLP `BioProt` Pythonic reaction/thermocycling pseudocode (`ast.parse`, zero `exec`/`eval`) and structured wet-lab action dictionaries into multi-pipette (`P20`/`P300`) liquid transfers and sealed high-temperature incubations.
 - **FineBio Atomic Manipulation Traces** (`from_finebio_trace`): Translates CVPR 2024 / IJCV 2025 `verb-manipulated-affected` plunger/vessel traces (`insert-*-tip`, `press`, `release`, `detach`, `eject-*-tip`) into single- and 8-channel aspirate, dispense, and multi-cycle mix operations while catching human tip-reuse contamination.
 - **BioProBench (`ORD`/`ERR`/`GEN`) & `LAB-Bench` (`ProtocolQA`)** (`from_bioprobench`): Converts procedural step-ordering and error-correction records into twin trajectories where valid protocols pass and scrambled/corrupted variants fail physical invariants (`enough_liquid`, `no_overfill`, `thawed_before_pipetting`, `high_temp_requires_seal`).
@@ -199,7 +202,44 @@ Only the good protocol reaches the mock executor; each broken one is stopped by 
 ```bash
 python scripts/fetch_open_protocols.py
 python scripts/fetch_open_protocols.py --online
+python scripts/fetch_opentrons_fixtures.py
 ```
+
+### Official Opentrons Protocol Fixtures (`84a9956efcca` — 19 Fixtures: `4 PASS`, `15 BLOCK`)
+
+`scripts/fetch_opentrons_fixtures.py` downloads all **19** official JSON fixtures from [`Opentrons/opentrons`](https://github.com/Opentrons/opentrons/tree/84a9956efccae8783f1a49ec14873222956f3284/shared-data/protocol/fixtures) (`Apache-2.0`, pinned at commit `84a9956efccae8783f1a49ec14873222956f3284` with SHA-256 verification into gitignored `data/opentrons_fixtures/`). Every `labwareId` and tip rack receives its own isolated namespace (zero container or tip-rack merging errors; supplying `loadLiquid` to `6/multipleTipracks.json` approves all 52 steps across 97 tips on `tiprack` + `tiprack_2`):
+
+| Fixture (`shared-data/protocol/fixtures/`) | Steps | Verdict | Rules Triggered | Reason |
+|---|---:|---|---|---|
+| `6/heaterShakerCommands.json` | 3 | `BLOCK` | `all_tips_dropped:1` | Transfers 5 uL declared `waterId` (`sourcePlateId -> destPlateId`) cleanly; omits final `dropTip` |
+| `6/heaterShakerCommandsWithResultsKey.json` | 0 | `BLOCK` | `empty_protocol:1` | Deck/module setup fixture only (0 liquid-handling, tip, or thermal commands) |
+| `6/multipleTempModules.json` | 44 | `BLOCK` | `unknown_start_volume:11` | 11 transfers across 5 distinct plates, 1 reservoir & 2 tip racks; omits `loadLiquid` |
+| `6/multipleTipracks.json` | 52 | `BLOCK` | `unknown_start_volume:13` | 13 transfers across 2 independent 96-tip racks & 12-reservoir; omits `loadLiquid` |
+| `6/multipleTipracksWithTC.json` | 53 | `BLOCK` | `unknown_start_volume:13` | Thermocycler lid seal + 13 transfers across 2 independent tip racks; omits `loadLiquid` |
+| `6/oneTiprack.json` | 4 | `BLOCK` | `unknown_start_volume:1` | Single 5 uL transfer between distinct source/dest plates; omits `loadLiquid` |
+| `6/simpleV6.json` | 4 | `PASS` | `none` | `p10_single` transfers 5 uL declared `waterId` (`sourcePlateId:A1 -> destPlateId:B1`) and drops tip |
+| `6/tempAndMagModuleCommands.json` | 3 | `BLOCK` | `all_tips_dropped:1` | Transfers 5 uL declared `waterId` between distinct plates; omits final `dropTip` |
+| `6/transferSettings.json` | 44 | `BLOCK` | `unknown_start_volume:11` | 11 transfers across 5 distinct plates, 1 reservoir & 2 tip racks; omits `loadLiquid` |
+| `7/moveLabware.json` | 1 | `BLOCK` | `all_tips_dropped:1` | Picks up tip and moves labware without dropping tip at end |
+| `7/simpleV7.json` | 4 | `BLOCK` | `schema_valid:1, tip_present:3, unknown_start_volume:1` | Multi-channel `p1000_96` targets non-row-A `B1` without single-nozzle config; `C1..H1` undeclared |
+| `8/moveLabware8.json` | 1 | `BLOCK` | `all_tips_dropped:1` | Picks up tip and moves labware without dropping tip at end |
+| `8/moveLabwareFlex8.json` | 1 | `BLOCK` | `all_tips_dropped:1` | Picks up tip on Flex deck and moves labware without dropping tip at end |
+| `8/simpleFlexV10CommandsV8.json` | 4 | `BLOCK` | `schema_valid:1, tip_present:3, unknown_start_volume:1` | Multi-channel `p1000_96` targets non-row-A `B1` without single-nozzle config; `C1..H1` undeclared |
+| `8/simpleFlexV8.json` | 4 | `BLOCK` | `schema_valid:1, tip_present:3, unknown_start_volume:1` | Multi-channel `p1000_96` targets non-row-A `B1` without single-nozzle config; `C1..H1` undeclared |
+| `8/simpleFlexV9CommandsV8.json` | 4 | `BLOCK` | `schema_valid:1, tip_present:3, unknown_start_volume:1` | Multi-channel `p1000_96` targets non-row-A `B1` without single-nozzle config; `C1..H1` undeclared |
+| `8/simpleV10CommandsV8.json` | 4 | `PASS` | `none` | `p10_single` transfers 5 uL declared `waterId` (`sourcePlateId:A1 -> destPlateId:B1`) and drops tip |
+| `8/simpleV8.json` | 4 | `PASS` | `none` | `p10_single` transfers 5 uL declared `waterId` (`sourcePlateId:A1 -> destPlateId:B1`) and drops tip |
+| `8/simpleV9CommandsV8.json` | 4 | `PASS` | `none` | `p10_single` transfers 5 uL declared `waterId` (`sourcePlateId:A1 -> destPlateId:B1`) and drops tip |
+
+### `BioProBench` `ERR` Evaluation (`ERR_test.json` — 1,200 Real Test Records)
+
+Evaluating the full ICML 2026 `BioProBench` `ERR_test.json` split (`1,200` records: `602` `is_correct=true`, `598` `is_correct=false`, `eval_only=true` into gitignored `data/bioprobench/`) through `from_bioprobench(..., variant="candidate")` + `rehearse` + `verify` under default single-P300 (`20–300 uL`) 96-well plate geometry shows the physical scope boundary between robotic deck rehearsal and general bench biology:
+
+| Subset | Records | Twin `PASS` | Twin `BLOCK` | Dominant Rules / Notes |
+|---|---:|---:|---:|---|
+| Corrupted (`is_correct=false`, `>= 1` extracted step) | 342 | 266 | 76 | `volume_in_range:78`, `enough_liquid:41`, `no_overfill:32`, `high_temp_requires_seal:3`, `incubate_temp_duration_bounds:1` (`4 / 342` paired `corrupted -> BLOCK` & `corrected -> PASS` flips) |
+| Clean (`is_correct=true`, `>= 1` extracted step) | 319 | 247 | 72 | `volume_in_range:98`, `enough_liquid:32`, `no_overfill:31` (micro-volumes `< 20 uL` or macro tube volumes `> 300 uL` outside single-P300 96-well bounds) |
+| Non-liquid / non-convertible bench steps | 539 | — | — | Centrifugation RCF, CO2 %, molarity, microscopy, and gel steps without pipetting/thermal ops |
 
 ## Datasets
 

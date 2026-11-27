@@ -1,4 +1,7 @@
 data/
+lean/.lake/
+lean/build/
+lean/lake-manifest.json
 __pycache__/
 *.pyc
 .pytest_cache/

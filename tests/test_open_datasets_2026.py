@@ -20,6 +20,7 @@ for _p in (str(SRC_DIR), str(SCRIPTS_DIR)):
 
 import check_catalog  # noqa: E402
 import fetch_open_protocols  # noqa: E402
+import fetch_opentrons_fixtures  # noqa: E402
 from lab_rehearsal import (  # noqa: E402
     RehearsalSession,
     check_dataset_ingestion_policy,
@@ -386,10 +387,169 @@ def test_offline_fetch_open_protocols_session_and_cli_integration(tmp_path: Path
     sess.close()
 
 
+def test_issue_34_no_invented_start_stock_and_multi_labware_tiprack_isolation() -> None:
+    # 1. Converter never invents `start` stock when `loadLiquid` is absent; reports `unknown_start_volume`
+    no_liq_doc = {
+        "$otSharedSchema": "#/protocol/schemas/7",
+        "schemaVersion": 7,
+        "commands": [
+            {"commandType": "loadPipette", "params": {"pipetteId": "p300", "pipetteName": "p300_single_gen2"}},
+            {"commandType": "loadLabware", "params": {"labwareId": "tips1", "loadName": "opentrons_96_tiprack_300ul"}},
+            {"commandType": "loadLabware", "params": {"labwareId": "res1", "loadName": "nest_12_reservoir_15ml"}},
+            {"commandType": "loadLabware", "params": {"labwareId": "plate1", "loadName": "corning_96_wellplate_360ul_flat"}},
+            {"commandType": "pickUpTip", "params": {"pipetteId": "p300", "labwareId": "tips1", "wellName": "A1"}},
+            {"commandType": "aspirate", "params": {"pipetteId": "p300", "labwareId": "res1", "wellName": "A1", "volume": 50.0}},
+            {"commandType": "dispense", "params": {"pipetteId": "p300", "labwareId": "plate1", "wellName": "A1", "volume": 50.0}},
+            {"commandType": "dropTip", "params": {"pipetteId": "p300", "labwareId": "fixedTrash", "wellName": "A1"}},
+        ],
+    }
+    steps_nl, spec_nl = from_opentrons_json(no_liq_doc)
+    assert dict(spec_nl.start) == {}
+    t_nl, e_nl = rehearse(steps_nl, spec=spec_nl)
+    ok_nl, v_nl = verify(t_nl, e_nl)
+    assert ok_nl is False
+    assert _rules(v_nl) == ["unknown_start_volume"]
+
+    # 2. Multi-plate (2 plates), multi-reservoir (>11 stock wells = 14 stocks), and 2 tip racks never merge
+    cmds_multi: list[dict] = [
+        {"commandType": "loadPipette", "params": {"pipetteId": "p300m", "pipetteName": "p300_multi_gen2"}},
+        {"commandType": "loadPipette", "params": {"pipetteId": "p300s", "pipetteName": "p300_single_gen2"}},
+        {"commandType": "loadLabware", "params": {"labwareId": "tipsA", "loadName": "opentrons_96_tiprack_300ul"}},
+        {"commandType": "loadLabware", "params": {"labwareId": "tipsB", "loadName": "opentrons_96_tiprack_300ul"}},
+        {"commandType": "loadLabware", "params": {"labwareId": "resA", "loadName": "nest_12_reservoir_15ml"}},
+        {"commandType": "loadLabware", "params": {"labwareId": "resB", "loadName": "nest_12_reservoir_15ml"}},
+        {"commandType": "loadLabware", "params": {"labwareId": "plateA", "loadName": "corning_96_wellplate_360ul_flat"}},
+        {"commandType": "loadLabware", "params": {"labwareId": "plateB", "loadName": "corning_96_wellplate_360ul_flat"}},
+        {
+            "commandType": "loadLiquid",
+            "params": {
+                "liquidId": "buf",
+                "labwareId": "resA",
+                "volumeByWell": {f"A{c}": 5000.0 for c in range(1, 13)},
+            },
+        },
+        {
+            "commandType": "loadLiquid",
+            "params": {
+                "liquidId": "reag_extra",
+                "labwareId": "resB",
+                "volumeByWell": {"A1": 5000.0, "A2": 5000.0},
+            },
+        },
+        # Single-channel uses tipsA:A1 and transfers resB:A2 (14th stock well!) -> plateB:A1
+        {"commandType": "pickUpTip", "params": {"pipetteId": "p300s", "labwareId": "tipsA", "wellName": "A1"}},
+        {"commandType": "aspirate", "params": {"pipetteId": "p300s", "labwareId": "resB", "wellName": "A2", "volume": 60.0}},
+        {"commandType": "dispense", "params": {"pipetteId": "p300s", "labwareId": "plateB", "wellName": "A1", "volume": 60.0}},
+        {"commandType": "dropTip", "params": {"pipetteId": "p300s", "labwareId": "fixedTrash", "wellName": "A1"}},
+        # 8-channel uses tipsB:A1 (must NOT collide with tipsA:A1!) and transfers resA:A1 -> plateA:A1
+        {"commandType": "pickUpTip", "params": {"pipetteId": "p300m", "labwareId": "tipsB", "wellName": "A1"}},
+        {"commandType": "aspirate", "params": {"pipetteId": "p300m", "labwareId": "resA", "wellName": "A1", "volume": 40.0}},
+        {"commandType": "dispense", "params": {"pipetteId": "p300m", "labwareId": "plateA", "wellName": "A1", "volume": 40.0}},
+        {"commandType": "dropTip", "params": {"pipetteId": "p300m", "labwareId": "fixedTrash", "wellName": "A1"}},
+    ]
+    multi_doc = {
+        "$otSharedSchema": "#/protocol/schemas/7",
+        "schemaVersion": 7,
+        "liquids": {
+            "buf": {"displayName": "Buffer"},
+            "reag_extra": {"displayName": "Substrate 14"},
+        },
+        "commands": cmds_multi,
+    }
+    steps_m, spec_m = from_opentrons_json(multi_doc)
+    assert len(spec_m.start) == 14  # All 14 stock wells remain distinct (never collapsed to res:11)
+    assert spec_m.tipracks == ("tiprack_2",)
+    t_m, e_m = rehearse(steps_m, spec=spec_m)
+    ok_m, v_m = verify(t_m, e_m)
+    assert ok_m is True, v_m
+    assert e_m["tips_used"] == 9
+    assert e_m["plate"]["plate:A1"] == pytest.approx(60.0)
+    assert e_m["plate"]["plate_2:A1"] == pytest.approx(40.0)
+
+    # 3. 8-channel non-row-A target is preserved faithfully and caught rather than rewritten to row A
+    bad_8ch_doc = {
+        "$otSharedSchema": "#/protocol/schemas/7",
+        "schemaVersion": 7,
+        "liquids": {"buf": {"displayName": "Buffer"}},
+        "commands": [
+            {"commandType": "loadPipette", "params": {"pipetteId": "p300m", "pipetteName": "p300_multi_gen2"}},
+            {"commandType": "loadLabware", "params": {"labwareId": "tips1", "loadName": "opentrons_96_tiprack_300ul"}},
+            {"commandType": "loadLabware", "params": {"labwareId": "res1", "loadName": "nest_12_reservoir_15ml"}},
+            {"commandType": "loadLabware", "params": {"labwareId": "plate1", "loadName": "corning_96_wellplate_360ul_flat"}},
+            {"commandType": "loadLiquid", "params": {"liquidId": "buf", "labwareId": "res1", "volumeByWell": {"A1": 5000.0}}},
+            {"commandType": "pickUpTip", "params": {"pipetteId": "p300m", "labwareId": "tips1", "wellName": "A1"}},
+            {"commandType": "aspirate", "params": {"pipetteId": "p300m", "labwareId": "res1", "wellName": "A1", "volume": 40.0}},
+            {"commandType": "dispense", "params": {"pipetteId": "p300m", "labwareId": "plate1", "wellName": "B1", "volume": 40.0}},
+            {"commandType": "dropTip", "params": {"pipetteId": "p300m", "labwareId": "fixedTrash", "wellName": "A1"}},
+        ],
+    }
+    steps_b8, spec_b8 = from_opentrons_json(bad_8ch_doc)
+    assert steps_b8[2]["loc"] == "plate:B1"
+    t_b8, e_b8 = rehearse(steps_b8, spec=spec_b8)
+    ok_b8, v_b8 = verify(t_b8, e_b8)
+    assert ok_b8 is False
+    assert "schema_valid" in _rules(v_b8)
+
+
+def test_issue_34_pinned_19_official_opentrons_fixtures_regression() -> None:
+    sha_errs = fetch_opentrons_fixtures.verify_cached_fixture_sha256()
+    if sha_errs:
+        pytest.skip(
+            "Pinned 19 Opentrons fixtures not cached in data/opentrons_fixtures "
+            "(run `python scripts/fetch_opentrons_fixtures.py` online to populate cache)"
+        )
+
+    proto_schema = json.loads((REPO_ROOT / "schema" / "protocol.schema.json").read_text(encoding="utf-8"))
+    eval_rows = fetch_opentrons_fixtures.evaluate_opentrons_fixtures()
+    assert len(eval_rows) == 19
+
+    for row in eval_rows:
+        assert row["schema_errors"] == [], f"{row['fixture']} schema errors: {row['schema_errors']}"
+        assert row["verdict_matches_expected"] is True, (
+            f"{row['fixture']}: got approved={row['approved']} rules={row['rule_counts']}, "
+            f"expected approved={row['expected_approved']} rules={row['expected_rules']}"
+        )
+        raw_doc = json.loads(
+            (fetch_opentrons_fixtures.DEFAULT_FIXTURE_DIR / row["fixture"]).read_text(encoding="utf-8")
+        )
+        steps_f, spec_f = from_opentrons_json(raw_doc)
+        if steps_f:
+            jsonschema.validate(steps_f, proto_schema)
+        has_load_liq = any(c.get("commandType") == "loadLiquid" for c in raw_doc.get("commands", []))
+        if not has_load_liq:
+            assert dict(spec_f.start) == {}, f"{row['fixture']} unexpectedly invented start stock!"
+
+    # Supplying declared `loadLiquid` stocks to `6/multipleTipracks.json` approves all 13 transfers (97 tips)!
+    mt_doc = json.loads(
+        (fetch_opentrons_fixtures.DEFAULT_FIXTURE_DIR / "6" / "multipleTipracks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    mt_with_liq = dict(mt_doc)
+    mt_with_liq["liquids"] = {"buf": {"displayName": "Buffer"}}
+    mt_with_liq["commands"] = [
+        {
+            "commandType": "loadLiquid",
+            "params": {
+                "liquidId": "buf",
+                "labwareId": "9fbc1db0-0042-11ec-8258-f7ffdf5ad45a:opentrons/nest_12_reservoir_15ml/1",
+                "volumeByWell": {"A1": 15000.0, "A3": 15000.0, "A4": 15000.0},
+            },
+        },
+        *mt_doc["commands"],
+    ]
+    steps_mt, spec_mt = from_opentrons_json(mt_with_liq)
+    t_mt, e_mt = rehearse(steps_mt, spec=spec_mt)
+    ok_mt, v_mt = verify(t_mt, e_mt)
+    assert ok_mt is True, v_mt
+    assert e_mt["tips_used"] == 97
+
+
 def test_zero_cjk_characters_across_repository() -> None:
     text_exts = {".py", ".md", ".json", ".toml", ".yml", ".yaml", ".txt", ".jsonl", ".lean"}
+    ignored_dirs = {".git", "__pycache__", "data", ".lake", ".pytest_cache"}
     for path in REPO_ROOT.rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts:
+        if not path.is_file() or any(part in ignored_dirs for part in path.parts):
             continue
         if path.suffix.lower() in text_exts:
             text = path.read_text(encoding="utf-8")
