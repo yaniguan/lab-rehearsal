@@ -276,10 +276,45 @@ def _from_opentrons_protobuild_ast(py_source: str) -> tuple[list[dict[str, Any]]
     return steps, spec
 
 
+def _infer_labware_wells_and_max(
+    load_name: str,
+    d_obj: Mapping[str, Any] | None,
+) -> tuple[tuple[str, ...], float]:
+    if isinstance(d_obj, Mapping):
+        wells_def = d_obj.get("wells")
+        if isinstance(wells_def, Mapping) and wells_def:
+            well_names = tuple(str(w).strip().upper() for w in wells_def.keys())
+            vols = [
+                float(w_meta["totalLiquidVolume"])
+                for w_meta in wells_def.values()
+                if isinstance(w_meta, Mapping) and isinstance(w_meta.get("totalLiquidVolume"), (int, float))
+            ]
+            w_max = max(vols) if vols else 300.0
+            return well_names, w_max
+
+    lc = load_name.lower()
+    if any(tok in lc for tok in ("reservoir", "trough")):
+        if "_1_" in lc or lc.startswith("nest_1_") or "195ml" in lc or "290ml" in lc:
+            return ("A1",), 195000.0
+        return tuple(f"A{c}" for c in range(1, 13)), 15000.0
+    if "24_wellplate" in lc or "_24_" in lc:
+        return tuple(f"{r}{c}" for r in "ABCD" for c in range(1, 7)), 3400.0
+    if "200ul" in lc:
+        return tuple(f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)), 200.0
+    if "100ul" in lc:
+        return tuple(f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)), 100.0
+    return tuple(f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)), 300.0
+
+
 def from_opentrons_json(
     doc: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], DeckSpec]:
-    """Convert Opentrons Shared Protocol JSON (v6/v7/v8) or `protoBuilds` JSON into twin steps."""
+    """Convert Opentrons Shared Protocol JSON (v6/v7/v8) or `protoBuilds` JSON into twin steps.
+
+    Each distinct `labwareId` receives its own container or tip-rack namespace so multiple
+    plates, reservoirs, and tip racks never merge onto a single shared coordinate map, and
+    `DeckSpec.start` contains strictly `loadLiquid`-backed entries (`require_declared_start=True`).
+    """
     if not isinstance(doc, Mapping):
         raise ValueError("Opentrons JSON input must be a mapping/dict")
 
@@ -293,161 +328,259 @@ def from_opentrons_json(
     labware_defs = doc.get("labwareDefinitions") if isinstance(doc.get("labwareDefinitions"), Mapping) else {}
     liquids_meta = doc.get("liquids") if isinstance(doc.get("liquids"), Mapping) else {}
 
-    # 1. Discover pipettes (v6 top-level `pipettes` + v7 `loadPipette` commands)
+    # 1. Discover pipettes (v6 top-level `pipettes` + v7/v8 `loadPipette` commands)
     pipettes_map: dict[str, tuple[float, float, int]] = {}
     raw_pipettes = doc.get("pipettes")
     if isinstance(raw_pipettes, Mapping):
         for pid, pinfo in raw_pipettes.items():
             if isinstance(pinfo, Mapping):
-                pname = str(pinfo.get("name", pinfo.get("pipetteName", "p300_single")))
+                pname = str(pinfo.get("name") or pinfo.get("pipetteName") or "p300_single")
                 pipettes_map[str(pid)] = _pipette_bounds_for_name(pname)
 
-    # 2. Discover labware (v6 top-level `labware` + v7 `loadLabware` commands)
+    # 2. Discover modules & labware (v6 top-level + v7/v8 `loadModule` / `loadLabware` commands)
+    thermocycler_modules: set[str] = set()
+    raw_modules = doc.get("modules")
+    if isinstance(raw_modules, Mapping):
+        for mid, mmeta in raw_modules.items():
+            if isinstance(mmeta, Mapping) and "thermocycler" in str(mmeta.get("model", "")).lower():
+                thermocycler_modules.add(str(mid))
+
     labware_info: dict[str, dict[str, Any]] = {}
     raw_labware = doc.get("labware")
     if isinstance(raw_labware, Mapping):
         for lid, lmeta in raw_labware.items():
             if isinstance(lmeta, Mapping):
                 def_id = str(lmeta.get("definitionId", ""))
-                d_obj = labware_defs.get(def_id, {}) if isinstance(labware_defs, Mapping) else {}
+                d_obj = labware_defs.get(def_id) if isinstance(labware_defs, Mapping) else None
                 params = d_obj.get("parameters", {}) if isinstance(d_obj, Mapping) else {}
-                wells_def = d_obj.get("wells", {}) if isinstance(d_obj, Mapping) else {}
-                a1_vol = (
-                    float(wells_def["A1"]["totalLiquidVolume"])
-                    if isinstance(wells_def.get("A1"), Mapping)
-                    and "totalLiquidVolume" in wells_def["A1"]
-                    else 300.0
+                load_name = str(params.get("loadName", def_id)).lower()
+                disp_name = str(lmeta.get("displayName", "")).lower()
+                wells_tuple, w_max = _infer_labware_wells_and_max(
+                    load_name, d_obj if isinstance(d_obj, Mapping) else None
                 )
                 labware_info[str(lid)] = {
-                    "load_name": str(params.get("loadName", def_id)).lower(),
-                    "display_name": str(lmeta.get("displayName", "")).lower(),
-                    "is_tiprack": bool(params.get("isTiprack", False)) or "tiprack" in def_id.lower(),
-                    "is_trash": params.get("format") == "trash" or "trash" in def_id.lower() or lid == "fixedTrash",
-                    "well_max": a1_vol,
+                    "load_name": load_name,
+                    "display_name": disp_name,
+                    "is_tiprack": bool(params.get("isTiprack", False))
+                    or "tiprack" in def_id.lower()
+                    or "tip rack" in disp_name,
+                    "is_trash": params.get("format") == "trash"
+                    or "trash" in def_id.lower()
+                    or str(lid) == "fixedTrash",
+                    "well_max": w_max,
+                    "wells": wells_tuple,
+                    "module_id": None,
                 }
 
     loaded_liquids: list[tuple[str, str, str, float]] = []  # (labware_id, well_name, liquid_name, vol)
-    aspirated_labware: set[str] = set()
-    dispensed_labware: set[str] = set()
+    aspirated_labware: list[str] = []
+    dispensed_labware: list[str] = []
 
     for cmd in commands:
         if not isinstance(cmd, Mapping):
             continue
         ctype = str(cmd.get("commandType", ""))
         params = cmd.get("params") if isinstance(cmd.get("params"), Mapping) else {}
-        if ctype == "loadPipette":
+        if ctype == "loadModule":
+            mid = str(params.get("moduleId", ""))
+            model_s = str(params.get("model", "")).lower()
+            if mid and "thermocycler" in model_s:
+                thermocycler_modules.add(mid)
+        elif ctype == "loadPipette":
             pid = str(params.get("pipetteId", "default"))
-            pname = str(params.get("pipetteName", params.get("name", ""
-            )))
+            raw_pn = params.get("pipetteName") or params.get("name") or ""
+            pname = str(raw_pn).strip()
             if pname:
                 pipettes_map[pid] = _pipette_bounds_for_name(pname)
             elif pid not in pipettes_map:
                 pipettes_map[pid] = (20.0, 300.0, 1)
         elif ctype == "loadLabware":
             lid = str(params.get("labwareId", ""))
-            if lid and lid not in labware_info:
+            loc_obj = params.get("location") if isinstance(params.get("location"), Mapping) else {}
+            mod_id = str(loc_obj["moduleId"]) if loc_obj.get("moduleId") else None
+            if lid and lid in labware_info and mod_id:
+                labware_info[lid]["module_id"] = mod_id
+            elif lid and lid not in labware_info:
                 load_name = str(params.get("loadName", "")).lower()
                 disp_name = str(params.get("displayName", "")).lower()
-                well_max = 300.0
+                matched_def: Mapping[str, Any] | None = None
                 for d_obj in labware_defs.values():
                     if isinstance(d_obj, Mapping):
                         p_obj = d_obj.get("parameters", {})
                         if isinstance(p_obj, Mapping) and str(p_obj.get("loadName", "")).lower() == load_name:
-                            w_obj = d_obj.get("wells", {})
-                            if isinstance(w_obj, Mapping) and isinstance(w_obj.get("A1"), Mapping):
-                                well_max = float(w_obj["A1"].get("totalLiquidVolume", 300.0))
+                            matched_def = d_obj
                             break
+                wells_tuple, w_max = _infer_labware_wells_and_max(load_name, matched_def)
                 labware_info[lid] = {
                     "load_name": load_name,
                     "display_name": disp_name,
                     "is_tiprack": "tiprack" in load_name or "tip rack" in disp_name,
                     "is_trash": "trash" in load_name or "trash" in disp_name or lid == "fixedTrash",
-                    "well_max": well_max,
+                    "well_max": w_max,
+                    "wells": wells_tuple,
+                    "module_id": mod_id,
                 }
         elif ctype == "loadLiquid":
             lid = str(params.get("labwareId", ""))
             liq_id = str(params.get("liquidId", "reagent"))
             liq_entry = liquids_meta.get(liq_id, {}) if isinstance(liquids_meta, Mapping) else {}
-            liq_name = str(liq_entry.get("displayName", liq_id)).strip().lower().replace(" ", "_") or "reagent"
+            liq_name = (
+                str(liq_entry.get("displayName", liq_id)).strip().lower().replace(" ", "_")
+                or "reagent"
+            )
             vol_by_well = params.get("volumeByWell")
             if isinstance(vol_by_well, Mapping):
                 for wname, wvol in vol_by_well.items():
-                    if isinstance(wvol, (int, float)) and float(wvol) > 0:
+                    if isinstance(wvol, (int, float)) and not isinstance(wvol, bool) and float(wvol) > 0:
                         loaded_liquids.append((lid, str(wname), liq_name, float(wvol)))
         elif ctype in ("aspirate", "aspirateInPlace"):
-            if params.get("labwareId"):
-                aspirated_labware.add(str(params["labwareId"]))
+            lid_a = str(params.get("labwareId", ""))
+            if lid_a and lid_a not in aspirated_labware:
+                aspirated_labware.append(lid_a)
         elif ctype in ("dispense", "dispenseInPlace"):
-            if params.get("labwareId"):
-                dispensed_labware.add(str(params["labwareId"]))
+            lid_d = str(params.get("labwareId", ""))
+            if lid_d and lid_d not in dispensed_labware:
+                dispensed_labware.append(lid_d)
 
-    # Classify non-tiprack, non-trash labwares into reservoir/source vs primary assay plate
-    candidate_plates = [
+    # 3. Assign every distinct `labwareId` its own container or tip-rack namespace
+    tiprack_prefix_by_lid: dict[str, str] = {}
+    tiprack_prefixes: list[str] = []
+    for lid, info in labware_info.items():
+        if info["is_tiprack"] and not info["is_trash"]:
+            prefix = "tiprack" if len(tiprack_prefixes) == 0 else f"tiprack_{len(tiprack_prefixes) + 1}"
+            tiprack_prefix_by_lid[lid] = prefix
+            tiprack_prefixes.append(prefix)
+
+    candidate_containers = [
         lid
         for lid, info in labware_info.items()
         if not info["is_tiprack"] and not info["is_trash"]
     ]
-    explicit_reservoirs = {
+    reservoir_lids = [
         lid
-        for lid in candidate_plates
+        for lid in candidate_containers
         if any(
             tok in labware_info[lid]["load_name"] or tok in labware_info[lid]["display_name"]
             for tok in ("reservoir", "trough", "tuberack", "tube_rack")
         )
-    }
-    non_res_plates = [lid for lid in candidate_plates if lid not in explicit_reservoirs]
-    source_only_plates: set[str] = set()
-    if len(non_res_plates) > 1:
-        for lid in non_res_plates:
-            if (
-                (lid in aspirated_labware and lid not in dispensed_labware)
-                or "source" in lid.lower()
-                or "source" in labware_info[lid]["display_name"]
-            ):
-                source_only_plates.add(lid)
+    ]
+    plate_lids = [lid for lid in candidate_containers if lid not in reservoir_lids]
 
-    stock_labwares = explicit_reservoirs | source_only_plates
-    res_slot_map: dict[tuple[str, str], str] = {}
-    next_res_col = 1
+    # Choose primary destination plate -> `"plate"`; every other plate gets `"plate_2"`, `"plate_3"`, ...
+    primary_plate_lid: str | None = None
+    for lid in dispensed_labware:
+        if lid in plate_lids:
+            primary_plate_lid = lid
+            break
+    if primary_plate_lid is None and plate_lids:
+        for lid in plate_lids:
+            if "source" not in lid.lower() and "source" not in labware_info[lid]["display_name"]:
+                primary_plate_lid = lid
+                break
+        if primary_plate_lid is None:
+            primary_plate_lid = plate_lids[0]
+
+    plate_prefix_by_lid: dict[str, str] = {}
+    extra_plate_idx = 2
+    for lid in plate_lids:
+        if lid == primary_plate_lid:
+            plate_prefix_by_lid[lid] = "plate"
+        else:
+            plate_prefix_by_lid[lid] = f"plate_{extra_plate_idx}"
+            extra_plate_idx += 1
+
+    # Reservoir namespace per reservoir `labwareId`
+    res_prefix_by_lid: dict[str, str] = {}
+    for idx_r, lid in enumerate(reservoir_lids):
+        wells_r = labware_info[lid]["wells"]
+        is_std_12 = wells_r == tuple(f"A{c}" for c in range(1, 13))
+        if idx_r == 0 and is_std_12:
+            res_prefix_by_lid[lid] = "res"
+        else:
+            res_prefix_by_lid[lid] = f"res_{idx_r + 1}"
 
     def map_container(labware_id: str, well_name: str) -> str:
-        nonlocal next_res_col
         info = labware_info.get(labware_id, {})
         if info.get("is_trash") or labware_id == "fixedTrash" or "trash" in labware_id.lower():
             return "trash:1"
-        if info.get("is_tiprack") or "tiprack" in labware_id.lower():
-            return f"tiprack:{_normalize_plate_well(well_name)}"
-        if labware_id in stock_labwares:
-            key = (labware_id, well_name.strip().upper())
-            if key not in res_slot_map:
-                col_idx = min(next_res_col, 11)
-                res_slot_map[key] = f"res:{col_idx}"
-                next_res_col += 1
-            return res_slot_map[key]
-        return f"plate:{_normalize_plate_well(well_name)}"
+        w_clean = _normalize_plate_well(well_name)
+        if labware_id in tiprack_prefix_by_lid or info.get("is_tiprack") or "tiprack" in labware_id.lower():
+            tr_p = tiprack_prefix_by_lid.get(labware_id)
+            if tr_p is None:
+                tr_p = "tiprack" if not tiprack_prefixes else f"tiprack_{len(tiprack_prefixes) + 1}"
+                tiprack_prefix_by_lid[labware_id] = tr_p
+                tiprack_prefixes.append(tr_p)
+            return f"{tr_p}:{w_clean}"
+        if labware_id in res_prefix_by_lid:
+            rp = res_prefix_by_lid[labware_id]
+            if rp == "res":
+                m_c = re.match(r"^A(1[0-2]|[1-9])$", w_clean)
+                col_s = m_c.group(1) if m_c else "1"
+                return f"res:{col_s}"
+            return f"{rp}:{w_clean}"
+        if labware_id in plate_prefix_by_lid:
+            return f"{plate_prefix_by_lid[labware_id]}:{w_clean}"
+        # Dynamically referenced labwareId not in initial loadLabware gets its own distinct plate namespace
+        new_p = "plate" if not plate_prefix_by_lid else f"plate_{extra_plate_idx + len(plate_prefix_by_lid)}"
+        plate_prefix_by_lid[labware_id] = new_p
+        return f"{new_p}:{w_clean}"
 
-    # Populate initial DeckSpec.start from loadLiquid commands
+    # 4. Populate `start_map` strictly from `loadLiquid` commands (NEVER invent stock!)
     start_map: dict[str, tuple[float, str]] = {}
     diluents_set: set[str] = set(DEFAULT_DILUENTS)
-    used_source_plate_stock = bool(source_only_plates)
-
     for lid, wname, liq_name, wvol in loaded_liquids:
         mapped = map_container(lid, wname)
-        if mapped.startswith(("res:", "plate:")):
+        if mapped != "trash:1" and not mapped.startswith("tiprack"):
             prev_v, prev_l = start_map.get(mapped, (0.0, liq_name))
             start_map[mapped] = (_clean_vol(prev_v + wvol), prev_l)
             if _is_diluent_name(liq_name):
                 diluents_set.add(liq_name)
 
-    # Determine well_max across destination plates
-    dest_plate_maxes = [
-        labware_info[lid]["well_max"]
-        for lid in non_res_plates
-        if lid not in source_only_plates and labware_info[lid]["well_max"] > 0
-    ]
-    well_max = max(dest_plate_maxes) if dest_plate_maxes else 300.0
+    # Build per-container geometry specs in `DeckSpec.containers`
+    containers_spec: dict[str, dict[str, Any]] = {}
+    primary_well_max = 300.0
+    if primary_plate_lid is not None and primary_plate_lid in labware_info:
+        primary_well_max = float(labware_info[primary_plate_lid]["well_max"])
 
-    # Lower commands into micro-steps
+    for lid, p_pref in plate_prefix_by_lid.items():
+        info = labware_info.get(lid)
+        w_max = float(info["well_max"]) if info else 300.0
+        wells_t = tuple(info["wells"]) if info else tuple(f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13))
+        if p_pref == "plate" and wells_t == tuple(f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)):
+            primary_well_max = w_max
+        else:
+            containers_spec[p_pref] = {
+                "well_max": w_max,
+                "dead_vol": 0.0,
+                "role": "well",
+                "wells": wells_t,
+            }
+
+    primary_res_max = DEFAULT_DECK_SPEC.res_max
+    for lid, r_pref in res_prefix_by_lid.items():
+        info = labware_info.get(lid)
+        w_max = float(info["well_max"]) if info else 15000.0
+        wells_t = tuple(info["wells"]) if info else tuple(f"A{c}" for c in range(1, 13))
+        if r_pref == "res":
+            primary_res_max = w_max
+        else:
+            has_stock_here = any(k.startswith(f"{r_pref}:") for k in start_map)
+            containers_spec[r_pref] = {
+                "well_max": w_max,
+                "dead_vol": DEFAULT_DECK_SPEC.res_dead_vol if (has_stock_here and w_max >= 5000.0) else 0.0,
+                "role": "reagent" if has_stock_here else "well",
+                "wells": wells_t,
+            }
+
+    # Resolve thermocycler target plate prefix (if any)
+    tc_plate_prefix = "plate"
+    for lid, p_pref in plate_prefix_by_lid.items():
+        mod_id = labware_info.get(lid, {}).get("module_id")
+        if mod_id and mod_id in thermocycler_modules:
+            tc_plate_prefix = p_pref
+            break
+
+    # 5. Lower commands into micro-steps without rewriting 8-channel non-row-A targets
     steps: list[dict[str, Any]] = []
     single_pip = len(pipettes_map) <= 1
     held_by_pip: dict[str, float] = {pid: 0.0 for pid in pipettes_map}
@@ -455,7 +588,7 @@ def from_opentrons_json(
     wet_blowout_by_pip: dict[str, bool] = {}
     tip_on_by_pip: dict[str, bool] = {pid: False for pid in pipettes_map}
     module_temp_c: float | None = None
-    plate_sealed = False
+    sealed_plates: set[str] = set()
 
     for cmd in commands:
         if not isinstance(cmd, Mapping):
@@ -467,13 +600,16 @@ def from_opentrons_json(
         ch_kw: dict[str, Any] = {"channels": 8} if p_bounds[2] == 8 else {}
         pip_kw: dict[str, Any] = {} if single_pip else {"pipette": pid}
 
-        if ctype == "pickUpTip":
+        if ctype == "moveToWell":
+            lid_m = str(params.get("labwareId", ""))
+            wname_m = str(params.get("wellName", "A1"))
+            if lid_m:
+                last_loc_by_pip[pid] = map_container(lid_m, wname_m)
+
+        elif ctype == "pickUpTip":
             lid = str(params.get("labwareId", "tipRackId"))
             wname = str(params.get("wellName", "A1"))
             tip_loc = map_container(lid, wname)
-            if ch_kw and not tip_loc.startswith("tiprack:A"):
-                m_col = re.search(r"(1[0-2]|[1-9])$", tip_loc)
-                tip_loc = f"tiprack:A{m_col.group(1) if m_col else '1'}"
             steps.append({"op": "pick_up_tip", "loc": tip_loc, **ch_kw, **pip_kw})
             tip_on_by_pip[pid] = True
             held_by_pip[pid] = 0.0
@@ -483,13 +619,7 @@ def from_opentrons_json(
             lid = str(params.get("labwareId", ""))
             wname = str(params.get("wellName", "A1"))
             loc = map_container(lid, wname) if lid else last_loc_by_pip.get(pid, "res:1")
-            if ch_kw and loc.startswith("plate:") and not loc.startswith("plate:A"):
-                m_col = re.search(r"(1[0-2]|[1-9])$", loc)
-                loc = f"plate:A{m_col.group(1) if m_col else '1'}"
             vol = _clean_vol(float(params.get("volume", 0.0)))
-            if not loaded_liquids and loc.startswith("res:") and loc not in start_map:
-                liq_tag = "buffer" if loc == "res:1" else f"reagent_{loc.split(':')[1]}"
-                start_map[loc] = (10000.0, liq_tag)
             steps.append({"op": "aspirate", "loc": loc, "vol": vol, **ch_kw, **pip_kw})
             held_by_pip[pid] = _clean_vol(held_by_pip.get(pid, 0.0) + vol)
             last_loc_by_pip[pid] = loc
@@ -498,9 +628,6 @@ def from_opentrons_json(
             lid = str(params.get("labwareId", ""))
             wname = str(params.get("wellName", "A1"))
             loc = map_container(lid, wname) if lid else last_loc_by_pip.get(pid, "plate:A1")
-            if ch_kw and loc.startswith("plate:") and not loc.startswith("plate:A"):
-                m_col = re.search(r"(1[0-2]|[1-9])$", loc)
-                loc = f"plate:A{m_col.group(1) if m_col else '1'}"
             vol = _clean_vol(float(params.get("volume", 0.0)))
             well_loc = params.get("wellLocation") if isinstance(params.get("wellLocation"), Mapping) else {}
             offset = well_loc.get("offset") if isinstance(well_loc.get("offset"), Mapping) else {}
@@ -519,9 +646,6 @@ def from_opentrons_json(
             lid = str(params.get("labwareId", ""))
             wname = str(params.get("wellName", "A1"))
             loc = map_container(lid, wname) if lid else last_loc_by_pip.get(pid, "trash:1")
-            if ch_kw and loc.startswith("plate:") and not loc.startswith("plate:A"):
-                m_col = re.search(r"(1[0-2]|[1-9])$", loc)
-                loc = f"plate:A{m_col.group(1) if m_col else '1'}"
             rem = held_by_pip.get(pid, 0.0)
             if rem > VOL_EPS:
                 if steps and steps[-1].get("op") == "dispense" and steps[-1].get("loc") == loc:
@@ -548,32 +672,29 @@ def from_opentrons_json(
             "thermocycler/setTargetBlockTemperature",
         ):
             raw_t = params.get("celsius", params.get("temperature"))
-            if isinstance(raw_t, (int, float)):
+            if isinstance(raw_t, (int, float)) and not isinstance(raw_t, bool):
                 module_temp_c = min(98.0, max(4.0, float(raw_t)))
 
-        elif ctype == "thermocycler/closeLid" and not plate_sealed:
-            steps.append({"op": "seal", "loc": "plate"})
-            plate_sealed = True
+        elif ctype == "thermocycler/closeLid" and tc_plate_prefix not in sealed_plates:
+            steps.append({"op": "seal", "loc": tc_plate_prefix})
+            sealed_plates.add(tc_plate_prefix)
 
         elif ctype in ("waitForDuration", "delay"):
             secs = float(params.get("seconds", 0.0) or 0.0) + 60.0 * float(
                 params.get("minutes", 0.0) or 0.0
             )
             if secs > 0.0 and module_temp_c is not None and not any(tip_on_by_pip.values()):
-                if module_temp_c >= 80.0 and not plate_sealed:
-                    steps.append({"op": "seal", "loc": "plate"})
-                    plate_sealed = True
+                if module_temp_c >= 80.0 and tc_plate_prefix not in sealed_plates:
+                    steps.append({"op": "seal", "loc": tc_plate_prefix})
+                    sealed_plates.add(tc_plate_prefix)
                 steps.append(
                     {
                         "op": "incubate",
-                        "loc": "plate",
+                        "loc": tc_plate_prefix,
                         "temp_c": module_temp_c,
                         "duration_s": secs,
                     }
                 )
-
-    if not start_map:
-        start_map = dict(DEFAULT_DECK_SPEC.start)
 
     if pipettes_map:
         first_bounds = next(iter(pipettes_map.values()))
@@ -581,16 +702,30 @@ def from_opentrons_json(
     else:
         pip_min, pip_max, channels = 20.0, 300.0, 1
 
+    has_res_stock = any(k.startswith("res:") for k in start_map)
+    waste_set = set(DEFAULT_DECK_SPEC.waste_locs)
+    # Only keep `res:12` as automatic waste when the protocol does not explicitly pipette `res:12` as a trough
+    if any(
+        isinstance(st.get("loc"), str) and st["loc"] == "res:12" and st.get("op") in ("aspirate", "mix")
+        for st in steps
+    ):
+        waste_set.discard("res:12")
+
     spec = DeckSpec(
-        well_max=float(well_max),
+        well_max=float(primary_well_max),
+        res_max=float(primary_res_max),
         pip_min=float(pip_min),
         pip_max=float(pip_max),
         channels=int(channels),
         pipettes={} if single_pip else pipettes_map,
-        res_dead_vol=0.0 if used_source_plate_stock else DEFAULT_DECK_SPEC.res_dead_vol,
-        plate_dead_vol=0.0 if used_source_plate_stock else DEFAULT_DECK_SPEC.plate_dead_vol,
+        res_dead_vol=DEFAULT_DECK_SPEC.res_dead_vol if has_res_stock else 0.0,
+        plate_dead_vol=0.0,
         start=start_map,
         diluents=frozenset(diluents_set),
+        waste_locs=frozenset(waste_set),
+        containers=containers_spec,
+        tipracks=tuple(tp for tp in tiprack_prefixes if tp != "tiprack"),
+        require_declared_start=True,
     )
     return steps, spec
 
@@ -1401,10 +1536,15 @@ def from_bioprobench(
             [str(x) for x in raw_list], scale_macro_volumes=scale_macro_volumes
         )
 
-    # Case 2: BioProBench ERR (`corrected_text` vs `corrupted_text`)
+    # Case 2: BioProBench ERR (`corrected_text` vs `corrupted_text`; when `is_correct=true`, `corrupted_text` is null)
     if "corrected_text" in record or "corrupted_text" in record:
-        use_corrupted = variant in ("wrong", "corrupted")
-        body = str(record.get("corrupted_text" if use_corrupted else "corrected_text", ""))
+        use_corrupted = variant in ("wrong", "corrupted", "candidate")
+        raw_body = (
+            record.get("corrupted_text")
+            if (use_corrupted and record.get("corrupted_text") is not None)
+            else record.get("corrected_text", "")
+        )
+        body = str(raw_body or "")
         ctx = record.get("context") if isinstance(record.get("context"), Mapping) else {}
         sentences: list[str] = []
         prior = str(ctx.get("prior_step", "")).strip()

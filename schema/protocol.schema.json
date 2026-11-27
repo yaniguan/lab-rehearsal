@@ -14,7 +14,7 @@
           "op": { "const": "pick_up_tip" },
           "loc": {
             "type": "string",
-            "pattern": "^tiprack:[A-H](1[0-2]|[1-9])$"
+            "pattern": "^tiprack(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])$"
           },
           "channels": {
             "type": "integer",
@@ -51,7 +51,7 @@
           "op": { "const": "aspirate" },
           "loc": {
             "type": "string",
-            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|trash:1)$"
+            "pattern": "^(plate(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](1[0-2]|[1-9])|trash:1)$"
           },
           "vol": {
             "type": "number",
@@ -75,7 +75,7 @@
           "op": { "const": "dispense" },
           "loc": {
             "type": "string",
-            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|trash:1)$"
+            "pattern": "^(plate(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](1[0-2]|[1-9])|trash:1)$"
           },
           "vol": {
             "type": "number",
@@ -100,7 +100,7 @@
           "op": { "const": "mix" },
           "loc": {
             "type": "string",
-            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|trash:1)$"
+            "pattern": "^(plate(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](1[0-2]|[1-9])|trash:1)$"
           },
           "vol": {
             "type": "number",
@@ -129,7 +129,7 @@
           "op": { "const": "incubate" },
           "loc": {
             "type": "string",
-            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|plate)$"
+            "pattern": "^(plate(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](1[0-2]|[1-9])|plate(?:_[A-Za-z0-9_]+)?)$"
           },
           "temp_c": {
             "type": "number"
@@ -148,7 +148,7 @@
           "op": { "const": "seal" },
           "loc": {
             "type": "string",
-            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|plate)$"
+            "pattern": "^(plate(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](1[0-2]|[1-9])|plate(?:_[A-Za-z0-9_]+)?)$"
           }
         },
         "additionalProperties": false
@@ -160,7 +160,7 @@
           "op": { "const": "thaw" },
           "loc": {
             "type": "string",
-            "pattern": "^(plate:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|plate)$"
+            "pattern": "^(plate(?:_[A-Za-z0-9_]+)?:[A-H](1[0-2]|[1-9])|res:(1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](1[0-2]|[1-9])|plate(?:_[A-Za-z0-9_]+)?)$"
           }
         },
         "additionalProperties": false

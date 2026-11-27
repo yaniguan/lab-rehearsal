@@ -95,9 +95,16 @@ REQUIRED_KEYS_BY_OP: dict[str, frozenset[str]] = {
 TIPRACK_COORDS: tuple[str, ...] = tuple(
     f"tiprack:{row}{col}" for row in "ABCDEFGH" for col in range(1, 13)
 )
-_TIPRACK_RE = re.compile(r"^tiprack:[A-H](?:1[0-2]|[1-9])$")
-_TIPRACK_ROW_A_RE = re.compile(r"^tiprack:A(1[0-2]|[1-9])$")
-_PLATE_ROW_A_RE = re.compile(r"^plate:A(1[0-2]|[1-9])$")
+_TIPRACK_RE = re.compile(r"^tiprack(?:_[A-Za-z0-9_]+)?:[A-H](?:1[0-2]|[1-9])$")
+_TIPRACK_ROW_A_RE = re.compile(r"^(tiprack(?:_[A-Za-z0-9_]+)?):A(1[0-2]|[1-9])$")
+_PLATE_PREFIX_RE = re.compile(r"^plate(?:_[A-Za-z0-9_]+)?$")
+_PLATE_ROW_A_RE = re.compile(r"^(plate(?:_[A-Za-z0-9_]+)?):A(1[0-2]|[1-9])$")
+_LIQUID_LOC_SCHEMA_RE = re.compile(
+    r"^(plate(?:_[A-Za-z0-9_]+)?:[A-H](?:1[0-2]|[1-9])|res:(?:1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](?:1[0-2]|[1-9])|trash:1)$"
+)
+_THERMAL_LOC_SCHEMA_RE = re.compile(
+    r"^(plate(?:_[A-Za-z0-9_]+)?:[A-H](?:1[0-2]|[1-9])|res:(?:1[0-2]|[1-9])|res_[A-Za-z0-9_]+:[A-H](?:1[0-2]|[1-9])|plate(?:_[A-Za-z0-9_]+)?)$"
+)
 _MINHASH_SEEDS: tuple[int, ...] = tuple(0x9E3779B1 * (i + 1) + 0x85EBCA77 for i in range(18))
 
 
@@ -171,6 +178,9 @@ class DeckSpec:
     sealed_locs: frozenset[str] = frozenset()
     evap_coeffs: Mapping[str, float] = field(default_factory=dict)
     strict_tenths: bool = False
+    containers: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    tipracks: tuple[str, ...] = ()
+    require_declared_start: bool = False
 
     def to_canonical_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -201,6 +211,20 @@ class DeckSpec:
             out["evap_coeffs"] = {str(k): float(v) for k, v in sorted(self.evap_coeffs.items())}
         if self.strict_tenths:
             out["strict_tenths"] = True
+        if self.containers:
+            out["containers"] = {
+                str(cp): {
+                    "well_max": float(cinfo.get("well_max", self.well_max)),
+                    "dead_vol": float(cinfo.get("dead_vol", 0.0)),
+                    "role": str(cinfo.get("role", "well")),
+                    "wells": [str(w) for w in cinfo.get("wells", ())],
+                }
+                for cp, cinfo in sorted(self.containers.items())
+            }
+        if self.tipracks:
+            out["tipracks"] = [str(tp) for tp in self.tipracks]
+        if self.require_declared_start:
+            out["require_declared_start"] = True
         return out
 
 
@@ -208,38 +232,68 @@ DEFAULT_DECK_SPEC = DeckSpec()
 
 
 def new_deck(spec: DeckSpec = DEFAULT_DECK_SPEC) -> dict[str, Any]:
-    """Initialize a fresh virtual deck with 96-well plate, 12-col reservoir, waste, and 96-tip rack."""
+    """Initialize a fresh virtual deck with plates, reservoirs, waste, and tip rack(s)."""
     deck: dict[str, Any] = {}
-    for row in "ABCDEFGH":
+    if "plate" not in spec.containers:
+        for row in "ABCDEFGH":
+            for col in range(1, 13):
+                loc = f"plate:{row}{col}"
+                init_vol, init_liq = spec.start.get(loc, (0.0, None))
+                v = _clean_vol(float(init_vol))
+                deck[loc] = {
+                    "vol": v,
+                    "max": float(spec.well_max),
+                    "dead_vol": float(spec.plate_dead_vol),
+                    "role": "waste" if loc in spec.waste_locs else "well",
+                    "liquids": {init_liq} if (init_liq and v > VOL_EPS) else set(),
+                    "amounts": {init_liq: v} if (init_liq and v > VOL_EPS) else {},
+                    "frozen": loc in spec.frozen_locs or "plate" in spec.frozen_locs,
+                    "sealed": loc in spec.sealed_locs or "plate" in spec.sealed_locs,
+                    "volume_known": (loc in spec.start) if spec.require_declared_start else True,
+                }
+    if "res" not in spec.containers:
         for col in range(1, 13):
-            loc = f"plate:{row}{col}"
+            loc = f"res:{col}"
             init_vol, init_liq = spec.start.get(loc, (0.0, None))
             v = _clean_vol(float(init_vol))
+            if loc in spec.waste_locs:
+                role = "waste"
+            elif spec.require_declared_start and v <= VOL_EPS:
+                role = "well"
+            else:
+                role = "reagent"
             deck[loc] = {
                 "vol": v,
-                "max": float(spec.well_max),
-                "dead_vol": float(spec.plate_dead_vol),
-                "role": "waste" if loc in spec.waste_locs else "well",
+                "max": float(spec.res_max),
+                "dead_vol": 0.0 if role != "reagent" else float(spec.res_dead_vol),
+                "role": role,
                 "liquids": {init_liq} if (init_liq and v > VOL_EPS) else set(),
                 "amounts": {init_liq: v} if (init_liq and v > VOL_EPS) else {},
-                "frozen": loc in spec.frozen_locs or "plate" in spec.frozen_locs,
-                "sealed": loc in spec.sealed_locs or "plate" in spec.sealed_locs,
+                "frozen": loc in spec.frozen_locs,
+                "sealed": loc in spec.sealed_locs,
+                "volume_known": (loc in spec.start) if spec.require_declared_start else True,
             }
-    for col in range(1, 13):
-        loc = f"res:{col}"
-        init_vol, init_liq = spec.start.get(loc, (0.0, None))
-        v = _clean_vol(float(init_vol))
-        role = "waste" if loc in spec.waste_locs else "reagent"
-        deck[loc] = {
-            "vol": v,
-            "max": float(spec.res_max),
-            "dead_vol": 0.0 if role == "waste" else float(spec.res_dead_vol),
-            "role": role,
-            "liquids": {init_liq} if (init_liq and v > VOL_EPS) else set(),
-            "amounts": {init_liq: v} if (init_liq and v > VOL_EPS) else {},
-            "frozen": loc in spec.frozen_locs,
-            "sealed": loc in spec.sealed_locs,
-        }
+    for prefix, cinfo in sorted(spec.containers.items()):
+        w_max = float(cinfo.get("well_max", spec.well_max))
+        d_vol = float(cinfo.get("dead_vol", 0.0))
+        base_role = str(cinfo.get("role", "well"))
+        wells_seq = cinfo.get("wells", ())
+        for wname in wells_seq:
+            loc = f"{prefix}:{wname}"
+            init_vol, init_liq = spec.start.get(loc, (0.0, None))
+            v = _clean_vol(float(init_vol))
+            role = "waste" if loc in spec.waste_locs else base_role
+            deck[loc] = {
+                "vol": v,
+                "max": w_max,
+                "dead_vol": 0.0 if role == "waste" else d_vol,
+                "role": role,
+                "liquids": {init_liq} if (init_liq and v > VOL_EPS) else set(),
+                "amounts": {init_liq: v} if (init_liq and v > VOL_EPS) else {},
+                "frozen": loc in spec.frozen_locs or prefix in spec.frozen_locs,
+                "sealed": loc in spec.sealed_locs or prefix in spec.sealed_locs,
+                "volume_known": (loc in spec.start) if spec.require_declared_start else True,
+            }
     for wloc in sorted(spec.waste_locs):
         if wloc not in deck:
             deck[wloc] = {
@@ -251,10 +305,17 @@ def new_deck(spec: DeckSpec = DEFAULT_DECK_SPEC) -> dict[str, Any]:
                 "amounts": {},
                 "frozen": wloc in spec.frozen_locs,
                 "sealed": wloc in spec.sealed_locs,
+                "volume_known": True,
             }
     tiprack: dict[str, bool] = {}
     for idx, coord in enumerate(TIPRACK_COORDS):
         tiprack[coord] = idx < spec.tip_rack
+    for tp in spec.tipracks:
+        if tp == "tiprack":
+            continue
+        for row in "ABCDEFGH":
+            for col in range(1, 13):
+                tiprack[f"{tp}:{row}{col}"] = True
     deck["_tiprack"] = tiprack
     deck["_spec"] = spec
     return deck
@@ -1094,6 +1155,7 @@ def _fresh_nozzle() -> dict[str, Any]:
         "touched": set(),
         "touched_snapshots": [],
         "last_conc": {},
+        "had_unknown_aspirate": False,
     }
 
 
@@ -1191,26 +1253,58 @@ def rehearse(
         }
         return [], end_summary
 
-    tip = False
-    mounted_channels = 0
-    nozzles: list[dict[str, Any]] = [_fresh_nozzle() for _ in range(8)]
+    mounts: dict[str, dict[str, Any]] = {
+        "_default": {
+            "tip": False,
+            "mounted_channels": 0,
+            "nozzles": [_fresh_nozzle() for _ in range(8)],
+        }
+    }
+    all_tiprack_prefixes: tuple[str, ...] = ("tiprack",) + tuple(
+        tp for tp in active_spec.tipracks if tp != "tiprack"
+    )
+    all_tiprack_coords: tuple[str, ...] = tuple(
+        f"{tp}:{row}{col}"
+        for tp in all_tiprack_prefixes
+        for row in "ABCDEFGH"
+        for col in range(1, 13)
+    )
     trace: list[dict[str, Any]] = []
 
     for i, step in enumerate(steps, 1):
         if not isinstance(step, dict):
+            any_t = any(bool(ms["tip"]) for ms in mounts.values())
             trace.append(
                 {
                     "i": i,
                     "op": None,
                     "loc": None,
                     "vol": 0.0,
-                    "tip": tip,
+                    "tip": any_t,
                     "known": False,
                     "schema_error": f"step must be an object/dict, got {type(step).__name__}",
                     "spec": active_spec,
                 }
             )
             continue
+
+        raw_pip_mount = step.get("pipette")
+        mount_key = (
+            raw_pip_mount.strip()
+            if isinstance(raw_pip_mount, str) and raw_pip_mount.strip()
+            else "_default"
+        )
+        mstate = mounts.setdefault(
+            mount_key,
+            {
+                "tip": False,
+                "mounted_channels": 0,
+                "nozzles": [_fresh_nozzle() for _ in range(8)],
+            },
+        )
+        tip = bool(mstate["tip"])
+        mounted_channels = int(mstate["mounted_channels"])
+        nozzles: list[dict[str, Any]] = mstate["nozzles"]
 
         op = step.get("op")
         loc = step.get("loc")
@@ -1232,8 +1326,10 @@ def rehearse(
             well = active_deck.get(loc) if isinstance(loc, str) and not loc.startswith("_") else None
             is_known_loc = well is not None
         elif op in THERMAL_STATE_OPS:
-            if loc == "plate":
-                is_known_loc = True
+            if isinstance(loc, str) and _PLATE_PREFIX_RE.match(loc):
+                is_known_loc = any(
+                    isinstance(k, str) and k.startswith(f"{loc}:") for k in active_deck
+                )
             else:
                 well = active_deck.get(loc) if isinstance(loc, str) and not loc.startswith("_") else None
                 is_known_loc = well is not None
@@ -1247,10 +1343,19 @@ def rehearse(
             and step_channels == 8
             and op in LIQUID_OPS
             and isinstance(loc, str)
-            and loc.startswith("plate:")
-            and not _PLATE_ROW_A_RE.match(loc)
+            and (loc.startswith("plate:") or loc.startswith("plate_"))
         ):
-            schema_err = f"8-channel {op} on 96-well plate must target row A (plate:A1..A12), got {loc!r}"
+            m_plate_a = _PLATE_ROW_A_RE.match(loc)
+            if not m_plate_a:
+                schema_err = (
+                    f"8-channel {op} on 96-well plate must target row A (plate:A1..A12), got {loc!r}"
+                )
+            else:
+                p_pref, p_col = m_plate_a.group(1), int(m_plate_a.group(2))
+                if any(f"{p_pref}:{r_ch}{p_col}" not in active_deck for r_ch in "ABCDEFGH"):
+                    schema_err = (
+                        f"8-channel {op} requires 8 rows A..H on {p_pref} column {p_col}"
+                    )
 
         known = is_known_op and is_known_loc
         tips_left = sum(1 for v in tiprack.values() if v)
@@ -1283,20 +1388,20 @@ def rehearse(
                     fact["slot_has_tip"] = slot_has_tip
                     if not tip and slot_has_tip:
                         tiprack[loc] = False
-                        tip = True
-                        mounted_channels = 1
-                        nozzles = [_fresh_nozzle() for _ in range(8)]
+                        mstate["tip"] = True
+                        mstate["mounted_channels"] = 1
+                        mstate["nozzles"] = [_fresh_nozzle() for _ in range(8)]
                 else:
-                    next_slot = next((k for k in TIPRACK_COORDS if tiprack.get(k, False)), None)
+                    next_slot = next((k for k in all_tiprack_coords if tiprack.get(k, False)), None)
                     fact["tip_slot"] = next_slot
                     fact["slot_has_tip"] = next_slot is not None
                     if not tip and next_slot is not None:
                         tiprack[next_slot] = False
-                        tip = True
-                        mounted_channels = 1
-                        nozzles = [_fresh_nozzle() for _ in range(8)]
+                        mstate["tip"] = True
+                        mstate["mounted_channels"] = 1
+                        mstate["nozzles"] = [_fresh_nozzle() for _ in range(8)]
             else:
-                # 8-channel manifold pickup across rows A..H of a single column
+                # 8-channel manifold pickup across rows A..H of a single column on target tiprack
                 if loc is not None:
                     m_row_a = _TIPRACK_ROW_A_RE.match(loc)
                     if not m_row_a:
@@ -1304,8 +1409,9 @@ def rehearse(
                         fact["slot_has_tip"] = False
                         fact["bad_8ch_tip_row"] = True
                     else:
-                        col = int(m_row_a.group(1))
-                        col_slots = [f"tiprack:{r}{col}" for r in "ABCDEFGH"]
+                        tr_pref = m_row_a.group(1)
+                        col = int(m_row_a.group(2))
+                        col_slots = [f"{tr_pref}:{r}{col}" for r in "ABCDEFGH"]
                         missing = [s for s in col_slots if not tiprack.get(s, False)]
                         slot_has_tip = len(missing) == 0
                         fact["tip_slot"] = loc
@@ -1314,24 +1420,29 @@ def rehearse(
                         if not tip and slot_has_tip:
                             for s_coord in col_slots:
                                 tiprack[s_coord] = False
-                            tip = True
-                            mounted_channels = 8
-                            nozzles = [_fresh_nozzle() for _ in range(8)]
+                            mstate["tip"] = True
+                            mstate["mounted_channels"] = 8
+                            mstate["nozzles"] = [_fresh_nozzle() for _ in range(8)]
                 else:
+                    chosen_pref: str | None = None
                     chosen_col: int | None = None
-                    for col in range(1, 13):
-                        if all(tiprack.get(f"tiprack:{r}{col}", False) for r in "ABCDEFGH"):
-                            chosen_col = col
+                    for tr_pref in all_tiprack_prefixes:
+                        for col in range(1, 13):
+                            if all(tiprack.get(f"{tr_pref}:{r}{col}", False) for r in "ABCDEFGH"):
+                                chosen_pref = tr_pref
+                                chosen_col = col
+                                break
+                        if chosen_col is not None:
                             break
-                    if chosen_col is not None:
-                        fact["tip_slot"] = f"tiprack:A{chosen_col}"
+                    if chosen_pref is not None and chosen_col is not None:
+                        fact["tip_slot"] = f"{chosen_pref}:A{chosen_col}"
                         fact["slot_has_tip"] = True
                         if not tip:
                             for r in "ABCDEFGH":
-                                tiprack[f"tiprack:{r}{chosen_col}"] = False
-                            tip = True
-                            mounted_channels = 8
-                            nozzles = [_fresh_nozzle() for _ in range(8)]
+                                tiprack[f"{chosen_pref}:{r}{chosen_col}"] = False
+                            mstate["tip"] = True
+                            mstate["mounted_channels"] = 8
+                            mstate["nozzles"] = [_fresh_nozzle() for _ in range(8)]
                     else:
                         fact["tip_slot"] = None
                         fact["slot_has_tip"] = False
@@ -1342,17 +1453,17 @@ def rehearse(
             max_in_pip = max(float(nozzles[idx]["content"]) for idx in range(active_n))
             fact["in_pipette"] = max_in_pip
             fact["allow_wet_drop"] = bool(step.get("allow_wet_drop", False))
-            tip = False
-            mounted_channels = 0
-            nozzles = [_fresh_nozzle() for _ in range(8)]
+            mstate["tip"] = False
+            mstate["mounted_channels"] = 0
+            mstate["nozzles"] = [_fresh_nozzle() for _ in range(8)]
 
         elif op in THERMAL_STATE_OPS:
             target_wells: list[tuple[str, dict[str, Any]]]
-            if loc == "plate":
+            if isinstance(loc, str) and _PLATE_PREFIX_RE.match(loc):
                 target_wells = [
-                    (f"plate:{r}{c}", active_deck[f"plate:{r}{c}"])
-                    for r in "ABCDEFGH"
-                    for c in range(1, 13)
+                    (k, v)
+                    for k, v in active_deck.items()
+                    if isinstance(k, str) and k.startswith(f"{loc}:")
                 ]
             else:
                 assert well is not None
@@ -1410,6 +1521,11 @@ def rehearse(
                 last_conc=dict(n0["last_conc"]),
                 target_conc=dict(target_conc),
             )
+            if op in ("aspirate", "mix") and well["role"] != "waste" and not bool(well.get("volume_known", True)):
+                fact["start_volume_unknown"] = True
+                if op == "aspirate":
+                    n0["had_unknown_aspirate"] = True
+
             if op == "aspirate":
                 fact["pipette_after"] = _clean_vol(n0["content"] + vol)
                 take = _clean_vol(min(max(vol, 0.0), well["vol"]))
@@ -1441,6 +1557,8 @@ def rehearse(
             elif op == "dispense":
                 air_dispense = bool(step.get("air_dispense", False))
                 fact["air_dispense"] = air_dispense
+                if n0.get("had_unknown_aspirate") and n0["content"] <= VOL_EPS:
+                    fact["dispense_after_unknown_aspirate"] = True
                 give = _clean_vol(min(max(vol, 0.0), n0["content"]))
                 fact["give"] = give
                 if give > VOL_EPS and n0["content"] > VOL_EPS:
@@ -1460,6 +1578,7 @@ def rehearse(
                         n0["content"] = 0.0
                         n0["pip_amounts"].clear()
                     well["vol"] = _clean_vol(well["vol"] + give)
+                    well["volume_known"] = True
                     well["liquids"] = set(well["amounts"].keys())
                     if not air_dispense:
                         well["liquids"] |= n0["touched"]
@@ -1491,7 +1610,7 @@ def rehearse(
             if tip and mounted_channels not in (0, 8):
                 fact["channel_mismatch"] = (mounted_channels, 8)
 
-            shared_trough = not loc.startswith("plate:")
+            shared_trough = not (loc.startswith("plate:") or loc.startswith("plate_"))
             fact["shared_trough"] = shared_trough
             nozzle_facts: list[dict[str, Any]] = []
 
@@ -1499,6 +1618,16 @@ def rehearse(
                 assert well is not None
                 target_conc = _conc_map(well)
                 total_req_vol = _clean_vol(8.0 * vol)
+                unk_trough = (
+                    op in ("aspirate", "mix")
+                    and well["role"] != "waste"
+                    and not bool(well.get("volume_known", True))
+                )
+                if unk_trough:
+                    fact["start_volume_unknown"] = True
+                    if op == "aspirate":
+                        for idx in range(8):
+                            nozzles[idx]["had_unknown_aspirate"] = True
                 fact.update(
                     available=well["vol"],
                     dead_vol=well["dead_vol"],
@@ -1511,32 +1640,35 @@ def rehearse(
                 )
                 for idx in range(8):
                     nz = nozzles[idx]
-                    nozzle_facts.append(
-                        {
-                            "nozzle": idx,
-                            "op": op,
-                            "loc": loc,
-                            "vol": vol,
-                            "tip": tip,
-                            "spec": active_spec,
-                            "pip_min": pip_min,
-                            "pip_max": pip_max,
-                            "available": well["vol"],
-                            "dead_vol": well["dead_vol"],
-                            "role": well["role"],
-                            "frozen": bool(well.get("frozen", False)),
-                            "sealed": bool(well.get("sealed", False)),
-                            "in_pipette": nz["content"],
-                            "pipette_after": _clean_vol(nz["content"] + vol) if op in ("aspirate", "mix") else nz["content"],
-                            "air_dispense": bool(step.get("air_dispense", False)),
-                            "touched": set(nz["touched"]),
-                            "liquids": set(well["liquids"]),
-                            "pipette_liquids": set(nz["pip_amounts"].keys()),
-                            "touched_snapshots": [dict(s) for s in nz["touched_snapshots"]],
-                            "last_conc": dict(nz["last_conc"]),
-                            "target_conc": dict(target_conc),
-                        }
-                    )
+                    nf_s: dict[str, Any] = {
+                        "nozzle": idx,
+                        "op": op,
+                        "loc": loc,
+                        "vol": vol,
+                        "tip": tip,
+                        "spec": active_spec,
+                        "pip_min": pip_min,
+                        "pip_max": pip_max,
+                        "available": well["vol"],
+                        "dead_vol": well["dead_vol"],
+                        "role": well["role"],
+                        "frozen": bool(well.get("frozen", False)),
+                        "sealed": bool(well.get("sealed", False)),
+                        "in_pipette": nz["content"],
+                        "pipette_after": _clean_vol(nz["content"] + vol) if op in ("aspirate", "mix") else nz["content"],
+                        "air_dispense": bool(step.get("air_dispense", False)),
+                        "touched": set(nz["touched"]),
+                        "liquids": set(well["liquids"]),
+                        "pipette_liquids": set(nz["pip_amounts"].keys()),
+                        "touched_snapshots": [dict(s) for s in nz["touched_snapshots"]],
+                        "last_conc": dict(nz["last_conc"]),
+                        "target_conc": dict(target_conc),
+                    }
+                    if unk_trough:
+                        nf_s["start_volume_unknown"] = True
+                    if op == "dispense" and nz.get("had_unknown_aspirate") and nz["content"] <= VOL_EPS:
+                        nf_s["dispense_after_unknown_aspirate"] = True
+                    nozzle_facts.append(nf_s)
 
                 if op == "aspirate":
                     take_total = _clean_vol(min(max(total_req_vol, 0.0), well["vol"]))
@@ -1595,6 +1727,7 @@ def rehearse(
                                 nz["content"] = 0.0
                                 nz["pip_amounts"].clear()
                             well["vol"] = _clean_vol(well["vol"] + give)
+                            well["volume_known"] = True
                             well["liquids"] = set(well["amounts"].keys())
                             if not air_dispense:
                                 well["liquids"] |= nz["touched"]
@@ -1622,11 +1755,14 @@ def rehearse(
                                 nozzles[idx]["last_conc"] = dict(post_conc)
 
             else:
-                # 8-row plate column operation: plate:A{col}..H{col}
-                col = int(_PLATE_ROW_A_RE.match(loc).group(1))  # type: ignore[union-attr]
+                # 8-row plate column operation: {plate_prefix}:A{col}..H{col}
+                m_pr = _PLATE_ROW_A_RE.match(loc)
+                assert m_pr is not None
+                p_pref = m_pr.group(1)
+                col = int(m_pr.group(2))
                 air_dispense = bool(step.get("air_dispense", False))
                 for idx, row_ch in enumerate("ABCDEFGH"):
-                    r_loc = f"plate:{row_ch}{col}"
+                    r_loc = f"{p_pref}:{row_ch}{col}"
                     r_well = active_deck[r_loc]
                     nz = nozzles[idx]
                     r_conc = _conc_map(r_well)
@@ -1654,6 +1790,17 @@ def rehearse(
                         "last_conc": dict(nz["last_conc"]),
                         "target_conc": dict(r_conc),
                     }
+                    if (
+                        op in ("aspirate", "mix")
+                        and r_well["role"] != "waste"
+                        and not bool(r_well.get("volume_known", True))
+                    ):
+                        nf["start_volume_unknown"] = True
+                        if op == "aspirate":
+                            nz["had_unknown_aspirate"] = True
+                    if op == "dispense" and nz.get("had_unknown_aspirate") and nz["content"] <= VOL_EPS:
+                        nf["dispense_after_unknown_aspirate"] = True
+
                     if op == "aspirate":
                         take = _clean_vol(min(max(vol, 0.0), r_well["vol"]))
                         if take > VOL_EPS and r_well["vol"] > VOL_EPS:
@@ -1701,6 +1848,7 @@ def rehearse(
                                 nz["content"] = 0.0
                                 nz["pip_amounts"].clear()
                             r_well["vol"] = _clean_vol(r_well["vol"] + give)
+                            r_well["volume_known"] = True
                             r_well["liquids"] = set(r_well["amounts"].keys())
                             if not air_dispense:
                                 r_well["liquids"] |= nz["touched"]
@@ -1739,10 +1887,13 @@ def rehearse(
     plate = {
         k: v["vol"]
         for k, v in active_deck.items()
-        if isinstance(k, str) and k.startswith("plate:") and v["vol"] > VOL_EPS
+        if isinstance(k, str)
+        and (k.startswith("plate:") or k.startswith("plate_"))
+        and v["vol"] > VOL_EPS
     }
+    any_tip_on = any(bool(ms["tip"]) for ms in mounts.values())
     return trace, {
-        "tip_on": tip,
+        "tip_on": any_tip_on,
         "tips_used": initial_tips_left - final_tips_left,
         "tips_remaining": final_tips_left,
         "plate": plate,
@@ -1789,7 +1940,25 @@ def no_overfill(f: Mapping[str, Any]) -> str | None:
     return None
 
 
+def unknown_start_volume(f: Mapping[str, Any]) -> str | None:
+    if f.get("start_volume_unknown"):
+        return (
+            f"{f['op']} {f['vol']:g} uL from {f['loc']} with undeclared starting "
+            "liquid volume (missing loadLiquid)"
+        )
+    for nf in f.get("nozzle_facts", ()):
+        if nf.get("start_volume_unknown"):
+            return (
+                f"{nf['op']} {nf['vol']:g} uL from {nf['loc']} with undeclared starting "
+                "liquid volume (missing loadLiquid)"
+            )
+    return None
+
+
 def enough_liquid(f: Mapping[str, Any]) -> str | None:
+    if f.get("start_volume_unknown") or f.get("dispense_after_unknown_aspirate"):
+        return None
+
     if f.get("shared_trough") and f.get("channels") == 8:
         if f["op"] in ("aspirate", "mix"):
             available = float(f["available"])
@@ -1809,6 +1978,8 @@ def enough_liquid(f: Mapping[str, Any]) -> str | None:
                 )
         if f["op"] == "dispense":
             for nf in f.get("nozzle_facts", ()):
+                if nf.get("dispense_after_unknown_aspirate"):
+                    continue
                 if nf["vol"] > nf["in_pipette"] + VOL_EPS:
                     return (
                         f"dispense {nf['vol']:g} uL on nozzle {nf['nozzle'] + 1} "
@@ -2015,6 +2186,7 @@ STEP_RULES = [
     volume_in_range,
     tenth_ul_grid,
     no_overfill,
+    unknown_start_volume,
     enough_liquid,
     tip_present,
     no_aspirate_from_waste,
@@ -2364,11 +2536,11 @@ def validate_protocol_schema(steps: Any) -> list[str]:
             if vol <= 0:
                 errors.append(f"step {idx}: vol must be > 0, got {vol}")
             loc = step["loc"]
-            if not re.match(r"^(plate:[A-H](?:1[0-2]|[1-9])|res:(?:1[0-2]|[1-9])|trash:1)$", loc):
+            if not _LIQUID_LOC_SCHEMA_RE.match(loc):
                 errors.append(f"step {idx}: invalid loc {loc!r}")
         elif op in THERMAL_STATE_OPS:
             loc = step["loc"]
-            if not re.match(r"^(plate:[A-H](?:1[0-2]|[1-9])|res:(?:1[0-2]|[1-9])|plate)$", loc):
+            if not _THERMAL_LOC_SCHEMA_RE.match(loc):
                 errors.append(f"step {idx}: invalid loc {loc!r}")
             if op == "incubate" and float(step["duration_s"]) <= 0:
                 errors.append(f"step {idx}: duration_s must be > 0, got {step['duration_s']}")

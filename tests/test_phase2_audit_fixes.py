@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import hashlib
 from pathlib import Path
 import random
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
-import hashlib
 import jsonschema
 import pytest
 
@@ -21,6 +22,14 @@ SRC_DIR = REPO_ROOT / "src"
 for _p in (str(SRC_DIR), str(REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+from autolab_wire import (  # noqa: E402
+    build_lean_case_payload,
+    find_lake_executable,
+    find_lean_checker_binary,
+    find_lean_executable,
+    run_lean_checker_cases,
+)
 
 from community_extensions.calm_twin_calibrator import (  # noqa: E402
     CalmAdaptiveTwin,
@@ -582,7 +591,8 @@ def test_issue_26_sub_tenth_quantization_guard_and_multi_dispense() -> None:
     assert from_lablean(ll_multi) == multi_disp
 
 
-def test_issue_26_differential_parity_python_vs_labrehearsallean() -> None:
+def _build_differential_parity_cases() -> list[tuple[str, list[dict], DeckSpec, bool | None]]:
+    """Build 8 hand boundary cases + 40 seeded random trajectories (48 >= 47 cases)."""
     good_steps = json.loads(
         (REPO_ROOT / "demo" / "protocols" / "good_serial_dilution.json").read_text(encoding="utf-8")
     )
@@ -610,6 +620,15 @@ def test_issue_26_differential_parity_python_vs_labrehearsallean() -> None:
     # Pair last aspirate to 27.1 as well so only no_overfill triggers:
     boundary_300_1_fail[-3] = {"op": "aspirate", "loc": "res:1", "vol": 27.1}
 
+    overfill_301_in_300_fail = [
+        {"op": "pick_up_tip"},
+        {"op": "aspirate", "loc": "res:1", "vol": 200.0},
+        {"op": "dispense", "loc": "plate:A1", "vol": 200.0},
+        {"op": "aspirate", "loc": "res:1", "vol": 101.0},
+        {"op": "dispense", "loc": "plate:A1", "vol": 101.0},
+        {"op": "drop_tip"},
+    ]
+
     multi_air_ok = [
         {"op": "pick_up_tip"},
         {"op": "aspirate", "loc": "res:1", "vol": 200.0},
@@ -632,12 +651,13 @@ def test_issue_26_differential_parity_python_vs_labrehearsallean() -> None:
         }
     )
 
-    cases: list[tuple[str, list[dict], DeckSpec, bool]] = [
+    cases: list[tuple[str, list[dict], DeckSpec, bool | None]] = [
         ("good_serial_dilution", good_steps, DEFAULT_DECK_SPEC, True),
         ("reverse_serial_dilution", reverse_steps, DEFAULT_DECK_SPEC, False),
         ("jump_down_dilution", jump_down_steps, DEFAULT_DECK_SPEC, False),
         ("boundary_300_0_pass", boundary_300_pass, DEFAULT_DECK_SPEC, True),
         ("boundary_300_1_fail", boundary_300_1_fail, DEFAULT_DECK_SPEC, False),
+        ("overfill_301_in_300_fail", overfill_301_in_300_fail, DEFAULT_DECK_SPEC, False),
         ("multi_disp_air_ok", multi_air_ok, spec_prefill, True),
         ("multi_disp_sub_fail", multi_sub_fail, spec_prefill, False),
     ]
@@ -680,34 +700,156 @@ def test_issue_26_differential_parity_python_vs_labrehearsallean() -> None:
                     "duration_s": 120.0,
                 }
             )
-        t_r, e_r = rehearse(st_list)
-        ok_py, _ = verify(t_r, e_r)
-        cases.append((f"rand_{idx}", st_list, DEFAULT_DECK_SPEC, ok_py))
+        cases.append((f"rand_{idx}", st_list, DEFAULT_DECK_SPEC, None))
 
+    return cases
+
+
+def test_issue_26_differential_parity_python_vs_labrehearsallean() -> None:
+    """Fallback pure-Python reference check when Lean is absent (runs in all Python environments)."""
+    cases = _build_differential_parity_cases()
+    assert len(cases) >= 47
     for label, steps_c, spec_c, expected_ok in cases:
         t_py, e_py = rehearse(steps_c, spec=spec_c)
         ok_py, v_py = verify(t_py, e_py)
-        ok_lean = _LeanRefRunner.check_rehearsal(steps_c, spec=spec_c)
-        assert ok_py == expected_ok, f"{label}: Python expected {expected_ok}, got {ok_py} ({v_py})"
-        assert ok_lean == ok_py, f"Differential mismatch on {label}: Python={ok_py} ({v_py}) vs Lean={ok_lean}"
+        ok_lean_ref = _LeanRefRunner.check_rehearsal(steps_c, spec=spec_c)
+        if expected_ok is not None:
+            assert ok_py == expected_ok, f"{label}: Python expected {expected_ok}, got {ok_py} ({v_py})"
+        assert ok_lean_ref == ok_py, (
+            f"Fallback ref mismatch on {label}: Python={ok_py} ({v_py}) vs _LeanRefRunner={ok_lean_ref}"
+        )
 
-    # Direct Lean 4 compiler check on LabRehearsalLean.lean when `lean` is installed (zero repo residue!)
-    lean_bin = shutil.which("lean")
-    if lean_bin is None:
-        elan_lean = Path.home() / ".elan" / "toolchains" / "leanprover--lean4---v4.36.0" / "bin" / "lean.exe"
-        if elan_lean.exists():
-            lean_bin = str(elan_lean)
-    if lean_bin is not None:
-        with tempfile.TemporaryDirectory() as tmp_lean:
-            olean_out = Path(tmp_lean) / "LabRehearsalLean.olean"
+
+def test_issue_35_real_lean_differential_parity_and_axiom_audit() -> None:
+    """Run >= 47 cases against compiled Lean `LabRehearsalLean.checkRehearsal` and audit theorem axioms."""
+    import os
+
+    require_lean = os.environ.get("REQUIRE_REAL_LEAN", "") == "1"
+    lean_bin = find_lean_executable()
+    lake_bin = find_lake_executable()
+    if lean_bin is None and lake_bin is None and find_lean_checker_binary() is None:
+        if require_lean:
+            pytest.fail("REQUIRE_REAL_LEAN=1 is set, but Lean 4 toolchain (lean/lake) was not found")
+        pytest.skip(
+            "Lean 4 toolchain (lean/lake) not installed; skipping real Lean checkRehearsal differential test"
+        )
+
+    cases = _build_differential_parity_cases()
+    assert len(cases) >= 47
+
+    lean_payloads = [
+        build_lean_case_payload(label, steps_c, spec_c, proto_hash_int=idx + 1)
+        for idx, (label, steps_c, spec_c, _) in enumerate(cases)
+    ]
+    lean_results = run_lean_checker_cases(lean_payloads, auto_build=True)
+    if lean_results is None:
+        if require_lean:
+            pytest.fail("REQUIRE_REAL_LEAN=1 is set, but lab-rehearsal-check could not be built or run")
+        pytest.skip(
+            "Lean 4 binary lab-rehearsal-check unavailable and lake could not build it; skipping real Lean check"
+        )
+
+    assert len(lean_results) == len(cases)
+    by_id = {str(r["id"]): r for r in lean_results}
+    mismatches: list[str] = []
+    for label, steps_c, spec_c, expected_ok in cases:
+        t_py, e_py = rehearse(steps_c, spec=spec_c)
+        ok_py, v_py = verify(t_py, e_py)
+        r_lean = by_id[label]
+        ok_lean = bool(r_lean["ok"])
+        if ok_lean != ok_py:
+            mismatches.append(
+                f"{label}: Python={ok_py} ({v_py}) vs Lean={ok_lean} "
+                f"(rule={r_lean.get('rule')}, detail={r_lean.get('detail')})"
+            )
+        if expected_ok is not None:
+            assert ok_lean == expected_ok, f"{label}: Lean expected {expected_ok}, got {r_lean}"
+            assert ok_py == expected_ok, f"{label}: Python expected {expected_ok}, got {ok_py} ({v_py})"
+
+    assert mismatches == [], f"Real Lean differential mismatches ({len(mismatches)}): {mismatches}"
+    print(
+        f"[real-lean-parity] Verified {len(cases)} cases against LabRehearsalLean.checkRehearsal (0 mismatches)"
+    )
+
+    # Mutation sensitivity check: relaxing Python `no_overfill` to allow 301 uL in a 300 uL well
+    # immediately causes a verdict mismatch against real Lean `checkRehearsal`!
+    import lab_rehearsal.core as core_mod
+
+    overfill_case = next(c for c in cases if c[0] == "overfill_301_in_300_fail")
+    def _mutated_no_overfill(f):
+        if f.get("op") == "dispense" and float(f.get("dest_after", 0.0)) <= 301.0:
+            return None
+        return core_mod.no_overfill(f)
+
+    _mutated_no_overfill.__name__ = "no_overfill"
+    orig_rules = list(core_mod.STEP_RULES)
+    try:
+        core_mod.STEP_RULES = [
+            _mutated_no_overfill if fn.__name__ == "no_overfill" else fn
+            for fn in orig_rules
+        ]
+        t_mut, e_mut = rehearse(overfill_case[1], spec=overfill_case[2])
+        ok_py_mutated, _ = verify(t_mut, e_mut)
+    finally:
+        core_mod.STEP_RULES = orig_rules
+
+    lean_overfill = by_id["overfill_301_in_300_fail"]
+    assert ok_py_mutated is True
+    assert lean_overfill["ok"] is False
+    assert lean_overfill["rule"] == "no_well_overfill"
+    assert ok_py_mutated != bool(lean_overfill["ok"])
+
+    # `#print axioms` audit over all theorems in `lean/LabRehearsalLean.lean` (zero sorryAx/custom axioms)
+    if lean_bin is not None and lake_bin is not None:
+        lean_src = (REPO_ROOT / "lean" / "LabRehearsalLean.lean").read_text(encoding="utf-8")
+        theorem_names = re.findall(r"^(?:@\[[^\]]+\]\s+)?theorem\s+([A-Za-z0-9_']+)", lean_src, flags=re.M)
+        assert len(theorem_names) >= 29
+        allowed_axioms = {"propext", "Quot.sound", "Classical.choice"}
+        with tempfile.TemporaryDirectory(prefix="lean_axiom_audit_") as tmp_dir:
+            audit_file = Path(tmp_dir) / "AxiomAudit.lean"
+            lines = ["import LabRehearsalLean"] + [
+                f"#print axioms LabRehearsalLean.{thm}" for thm in theorem_names
+            ]
+            audit_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
             proc = subprocess.run(
-                [lean_bin, str(REPO_ROOT / "lean" / "LabRehearsalLean.lean"), "-o", str(olean_out)],
+                [lake_bin, "env", lean_bin, str(audit_file)],
                 cwd=str(REPO_ROOT / "lean"),
                 capture_output=True,
                 text=True,
             )
             assert proc.returncode == 0, proc.stderr + proc.stdout
             assert "warning:" not in proc.stderr and "warning:" not in proc.stdout
+            assert "sorryAx" not in proc.stdout and "sorryAx" not in proc.stderr
+            for out_line in proc.stdout.splitlines():
+                if "depends on axioms:" in out_line:
+                    bracket = out_line.split("[", 1)[1].rsplit("]", 1)[0]
+                    used = {a.strip() for a in bracket.split(",") if a.strip()}
+                    assert used <= allowed_axioms, f"Unexpected axiom in {out_line}"
+
+
+def test_issue_35_cross_platform_elan_discovery_and_missing_lean_skip(monkeypatch, tmp_path) -> None:
+    """Verify POSIX `~/.elan/bin/lean` discovery (no `.exe`) and clean fallback when absent."""
+    import autolab_wire
+
+    monkeypatch.setattr(autolab_wire.shutil, "which", lambda _name: None)
+
+    # 1. Empty home directory -> returns None cleanly
+    empty_home = tmp_path / "empty_home"
+    empty_home.mkdir()
+    assert find_lean_executable(home_dir=empty_home) is None
+    assert find_lake_executable(home_dir=empty_home) is None
+    assert find_lean_checker_binary(repo_dir=empty_home) is None
+
+    # 2. POSIX layout (`~/.elan/bin/lean` and `~/.elan/bin/lake` without `.exe`) is discovered
+    posix_home = tmp_path / "posix_home"
+    elan_bin = posix_home / ".elan" / "bin"
+    elan_bin.mkdir(parents=True)
+    posix_lean = elan_bin / "lean"
+    posix_lake = elan_bin / "lake"
+    posix_lean.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    posix_lake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    assert find_lean_executable(home_dir=posix_home) == str(posix_lean)
+    assert find_lake_executable(home_dir=posix_home) == str(posix_lake)
 
 
 # ==============================================================================
